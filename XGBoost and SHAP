@@ -1,0 +1,1026 @@
+library(dplyr)        # 数据清洗和操作（filter、mutate等）
+library(caret)        # 创建数据分割（createDataPartition）
+
+# 机器学习建模
+library(xgboost)      # XGBoost模型训练和预测
+library(dbscan)       # 聚类分析（虽然代码中可能未直接使用）
+
+# 模型评估指标
+library(pROC)         # ROC曲线和AUC计算
+library(MLmetrics)    # 多分类LogLoss计算
+library(irr)          # Kappa系数计算（cohen.kappa函数）
+
+# 可视化
+library(ggplot2)      # 数据可视化（绘图）
+library(tidyr)        # 数据重塑（pivot_longer函数）
+
+# 其他工具
+library(lpSolve)      # 线性规划（代码中可能未直接使用）
+library(psych)        # 心理测量学工具（代码中可能未直接使用）
+DATA <- read.csv("after_wash_all.csv")[-1]
+
+
+rm(list = ls())
+data <- read.csv("after_wash_28.csv")[-1]
+data <- data[,c("age","sbp","ALT","tyg","BMI","WC","TG","AST","Scr","UA","LDL","ALB","cmets","ALP","cap_lev")]
+str(data)
+
+
+#-------------------------------------------------------
+# #核心模型版
+
+#拟合模型
+set.seed(123)
+splitIndex <- createDataPartition(data$cap_lev, p = .7, list = FALSE, times = 1)
+train_data <- data[ splitIndex,]
+val_data  <- data[-splitIndex,]
+str(train_data)
+str(val_data)
+table(train_data$cap_lev)
+str(train_data)
+
+
+dtrain <- xgb.DMatrix(data = as.matrix(train_data[, -which(names(train_data) == "cap_lev")]),
+                      label = train_data$cap_lev)
+dval <- xgb.DMatrix(data = as.matrix(val_data[, -which(names(val_data) == "cap_lev")]),
+                    label = val_data$cap_lev)
+set.seed(123)
+hyper_grid <- data.frame(
+  eta = runif(20, 0.01, 0.3),
+  max_depth = sample(3:8, 20, replace = TRUE),
+  subsample = runif(20, 0.6, 1),
+  colsample_bytree = runif(20, 0.6, 1),
+  gamma = runif(20, 0, 2),
+  min_child_weight = sample(1:10, 20, replace = TRUE)
+)
+results <- data.frame(
+  iter = 1:nrow(hyper_grid),
+  best_logloss = rep(Inf, nrow(hyper_grid)),
+  best_iter = rep(NA, nrow(hyper_grid))
+)
+
+pb <- txtProgressBar(min = 0, max = nrow(hyper_grid), style = 3)
+for(i in 1:nrow(hyper_grid)) {
+  # 参数设置
+  params <- list(
+    objective = "multi:softprob",
+    eval_metric = "mlogloss",
+    num_class = 3,  # 根据实际类别数修改
+    eta = hyper_grid$eta[i],
+    max_depth = hyper_grid$max_depth[i],
+    subsample = hyper_grid$subsample[i],
+    colsample_bytree = hyper_grid$colsample_bytree[i],
+    gamma = hyper_grid$gamma[i],
+    min_child_weight = hyper_grid$min_child_weight[i]
+  )
+  set.seed(123)
+  cv_model <- xgb.cv(
+    params = params,
+    data = dtrain,
+    nrounds = 1000,
+    nfold = 5,
+    early_stopping_rounds = 50,
+    verbose = 0
+  )
+  results$best_logloss[i] <- min(cv_model$evaluation_log$test_mlogloss_mean)
+  results$best_iter[i] <- cv_model$best_iteration
+  setTxtProgressBar(pb, i)
+}
+
+# 关闭进度条
+close(pb)
+# 获取最佳参数
+best_idx <- which.min(results$best_logloss)
+best_logloss <- results$best_logloss[best_idx]
+best_iter <- results$best_iter[best_idx]
+best_params <- hyper_grid[best_idx, ]
+
+# 训练最终模型
+xgb_model <- xgb.train(
+  params = list(
+    objective = "multi:softprob",
+    eval_metric = "mlogloss",
+    num_class = 3,
+    eta = best_params$eta,
+    max_depth = best_params$max_depth,
+    subsample = best_params$subsample,
+    colsample_bytree = best_params$colsample_bytree,
+    gamma = best_params$gamma,
+    min_child_weight = best_params$min_child_weight
+  ),
+  data = dtrain,
+  nrounds = best_iter,
+  verbose = 0
+)
+
+
+# 输出结果
+cat(" Best Parameters:\n")
+print(best_params)
+cat("\n Best LogLoss:", best_logloss, "at iteration", best_iter)
+
+
+#—————————————————————————————————————————
+# 函数：计算多分类AUC
+calculate_multi_auc <- function(true_labels, pred_prob) {
+  # 转换为one-hot编码
+  true_matrix <- model.matrix(~ as.factor(true_labels) - 1)
+  colnames(true_matrix) <- paste0("Class_", 0:(ncol(true_matrix)-1))
+  
+  # 确保概率矩阵列名匹配
+  colnames(pred_prob) <- colnames(true_matrix)
+  
+  # 计算每个类别的AUC
+  auc_values <- sapply(1:ncol(true_matrix), function(i) {
+    # 转换为因子确保类型正确
+    response <- factor(true_matrix[,i], levels = c(0, 1))
+    
+    # 跳过全0或全1的情况
+    if(length(unique(response)) < 2) return(NA_real_)
+    
+    # 计算ROC时明确指定参数
+    roc_obj <- pROC::roc(
+      response = response,
+      predictor = pred_prob[,i],
+      levels = c(0, 1), 
+      direction = "<",
+      quiet = TRUE
+    )
+    
+    as.numeric(pROC::auc(roc_obj))
+  })
+  
+  # 处理无效的AUC值
+  valid_auc <- auc_values[!is.na(auc_values)]
+  
+  # 计算宏观平均AUC（排除无效值）
+  macro_auc <- ifelse(length(valid_auc) > 0, mean(valid_auc), NA_real_)
+  
+  # 计算微观平均AUC
+  micro_auc <- tryCatch({
+    pROC::roc(
+      response = as.vector(true_matrix),
+      predictor = as.vector(pred_prob),
+      levels = c(0, 1),
+      direction = "<",
+      quiet = TRUE
+    )$auc
+  }, error = function(e) NA_real_)
+  
+  return(list(
+    ClassWise_AUC = round(auc_values, 4),
+    Macro_AUC = round(macro_auc, 4),
+    Micro_AUC = round(micro_auc, 4)
+  ))
+}
+
+# 训练集评估
+train_prob <- predict(xgb_model, dtrain, reshape = TRUE)
+train_auc <- calculate_multi_auc(train_data$cap_lev, train_prob)
+
+# 验证集评估
+val_prob <- predict(xgb_model, dval, reshape = TRUE)
+val_auc <- calculate_multi_auc(val_data$cap_lev, val_prob)
+
+# 输出评估结果
+cat("===== Training Set Performance =====\n")
+cat("Class-wise AUC:", train_auc$ClassWise_AUC, "\n")
+cat("Macro AUC:", train_auc$Macro_AUC, "\n")
+cat("Micro AUC:", train_auc$Micro_AUC, "\n\n")
+
+cat("===== Validation Set Performance =====\n")
+cat("Class-wise AUC:", val_auc$ClassWise_AUC, "\n")
+cat("Macro AUC:", val_auc$Macro_AUC, "\n")
+cat("Micro AUC:", val_auc$Micro_AUC, "\n")
+
+###如果训练集AUC明显高于验证集（差异>5%），可能存在过拟合
+#可通过增加正则化（gamma/lambda/alpha）或减小max_depth来改善
+
+library(MLmetrics)
+library(irr)
+library("lpSolve")
+library(psych)
+
+### 其他指标
+evaluate_model <- function(true_labels, pred_prob, pred_class) {
+  # 确保类型一致
+  true <- as.integer(true_labels)
+  pred <- as.integer(pred_class)
+  classes <- sort(unique(true))
+  print(true)  
+  # 初始化存储结果
+  metrics <- list()
+  
+  # 1. 分类报告（每个类别）
+  metrics$class_report <- lapply(classes, function(cls) {
+    tp <- sum(pred == cls & true == cls)
+    fp <- sum(pred == cls & true != cls)
+    fn <- sum(pred != cls & true == cls)
+    
+    precision <- tp / (tp + fp + .Machine$double.eps)
+    recall <- tp / (tp + fn + .Machine$double.eps)
+    f1 <- 2 * (precision * recall) / (precision + recall + .Machine$double.eps)
+    
+    return(c(
+      Precision = round(precision, 4),
+      Recall = round(recall, 4),
+      F1 = round(f1, 4)
+    ))
+  })
+  names(metrics$class_report) <- paste0("Class_", classes)
+  
+  # 2. 整体准确率
+  metrics$accuracy <- round(sum(pred == true) / length(true), 4)
+  
+  # 3. Log Loss（需确保概率矩阵格式正确）
+  true_onehot <- model.matrix(~ as.factor(true) - 1)
+  colnames(pred_prob) <- colnames(true_onehot)
+  metrics$logloss <- round(MLmetrics::MultiLogLoss(pred_prob, true_onehot), 4)
+  
+  # 4. MAE（假设为有序分类）
+  metrics$mae <- round(mean(abs(true - pred)), 4)
+  
+  # 5. 加权Kappa（使用二次权重）
+  kappa <- cohen.kappa(x = data.frame(true, pred))
+  metrics$weighted_kappa <- kappa$weighted.kappa
+  
+  # 6. 混淆矩阵
+  metrics$confusion_matrix <- table(
+    "Prediction" = factor(pred, levels = classes),
+    "Reference" = factor(true, levels = classes)
+  )
+  
+  return(metrics)
+}
+
+train_pred <- max.col(train_prob) - 1
+val_pred <- max.col(val_prob) - 1
+train_metrics <- evaluate_model(train_data$cap_lev, train_prob, train_pred)
+val_metrics <- evaluate_model(val_data$cap_lev, val_prob, val_pred)
+
+# 打印验证集结果
+cat("===== Validation Set Metrics =====\n")
+cat("Accuracy:", val_metrics$accuracy, "\n")
+cat("Log Loss:", val_metrics$logloss, "\n")
+cat("MAE:", val_metrics$mae, "\n")
+cat("Weighted Kappa:", val_metrics$weighted_kappa, "\n\n")
+
+cat("Class-wise Metrics:\n")
+print(do.call(rbind, val_metrics$class_report))
+
+cat("\nConfusion Matrix:\n")
+print(val_metrics$confusion_matrix)
+
+
+
+###可视化---------------------------------------------------------------------------------
+###训练集和验证集混淆矩阵
+# 优化后的混淆矩阵可视化代码
+plot_confusion_matrix <- function(conf_matrix, title = "Confusion Matrix Heatmap") {
+  # 将混淆矩阵转换为数据框
+  conf_matrix_df <- as.data.frame(conf_matrix)
+  colnames(conf_matrix_df) <- c("Prediction", "Reference", "Freq")
+  
+  # 使用ggplot绘制热图
+  ggplot(conf_matrix_df, aes(x = Reference, y = Prediction, fill = Freq)) +
+    geom_tile(color = "white", linewidth = 0.6) +  # 白色边框
+    geom_text(aes(label = Freq), color = "black", size = 4) +  # 黑色文字
+    scale_fill_gradient(low = "white", high = "steelblue") +  # 颜色渐变
+    theme_minimal(base_size = 12) +  # 简洁主题
+    labs(title = title, x = "Actual Class", y = "Predicted Class") +  # 标题和轴标签
+    theme(
+      panel.grid = element_blank(),  # 隐藏网格线
+      axis.text = element_text(color = "black"),  # 轴文字颜色
+      plot.title = element_text(hjust = 0.5, size = 14),  # 标题
+      axis.title = element_text(size = 12)  # 轴标题加粗
+    ) +
+    coord_fixed()  # 保持单元格为正方形
+}
+
+# 绘制训练集和验证集的混淆矩阵
+train_conf_plot <- plot_confusion_matrix(train_metrics$confusion_matrix, " Confusion Matrix Heatmap for XGBoost Model")
+val_conf_plot <- plot_confusion_matrix(val_metrics$confusion_matrix, " Confusion Matrix Heatmap for XGBoost Model")
+
+# 显示图形
+print(train_conf_plot)
+print(val_conf_plot)
+
+#ROC----------------------------
+# 获取预测概率矩阵（假设模型已经训练）
+pred_prob <- predict(xgb_model, dval, reshape = TRUE)
+
+# 获取真实标签（确保是0-based数值）
+
+true_labels <- as.numeric(val_data$cap_lev)   # 如果原始是factor需要转换
+
+# 计算各分类的ROC曲线
+roc0 <- roc(response = (true_labels == 0), predictor = pred_prob[,1])
+roc1 <- roc(response = (true_labels == 1), predictor = pred_prob[,2])
+roc2 <- roc(response = (true_labels == 2), predictor = pred_prob[,3])
+
+# 计算宏平均ROC
+common_fpr <- seq(0, 1, length.out = 100)
+interp_tpr <- function(roc_obj) {
+  # 预处理数据：去重并取平均TPR
+  fpr <- 1 - roc_obj$specificities
+  tpr <- roc_obj$sensitivities
+  df <- aggregate(tpr ~ fpr, data = data.frame(fpr, tpr), FUN = mean)
+  df <- df[order(df$fpr), ]  # 确保按FPR升序排列
+  # 线性插值到公共FPR点
+  approx(df$fpr, df$tpr, xout = common_fpr, method = "linear", rule = 2)$y
+}
+# 计算宏平均TPR（不再出现警告）
+macro_tpr <- rowMeans(sapply(list(roc0, roc1, roc2), interp_tpr))
+
+# 计算微平均ROC
+micro_true <- c()
+micro_pred <- c()
+for (i in seq_along(true_labels)) {
+  k <- true_labels[i]
+  micro_true <- c(micro_true, 1, 0, 0)
+  micro_pred <- c(micro_pred, pred_prob[i, k+1], pred_prob[i, setdiff(1:3, k+1)])
+}
+roc_micro <- roc(micro_true, micro_pred)
+
+# 计算AUC值
+auc0 <- as.numeric(roc0$auc)
+auc1 <- as.numeric(roc1$auc)
+auc2 <- as.numeric(roc2$auc)
+macro_auc <- mean(c(auc0, auc1, auc2))
+micro_auc <- as.numeric(roc_micro$auc)
+# 准备标注数据，并指定短线类型
+auc_data <- data.frame(
+  Type = c("none", "mild", "moderate_to_severe", "Macro Average", "Micro Average"),
+  AUC = c(auc0, auc1, auc2, macro_auc, micro_auc),
+  x = 0.70,  # 修改为从0.70开始的统一x坐标
+  y = seq(0.25, by=-0.05, length.out=5),  # 从0.25递减至0.05
+  LineType = c("dashed", "dashed", "dashed", "solid", "solid")  # 短线类型
+)
+# 控制短线长度
+short_line_length <- 0.04 # 控制短线长度
+auc_data$x_shortline_end <- auc_data$x - short_line_length # 计算短线终点x坐标
+
+# 绘图数据准备
+plot_data <- rbind(
+  data.frame(FPR = 1 - roc0$specificities, TPR = roc0$sensitivities, 
+             Type = "none", LineType = "dashed"),
+  data.frame(FPR = 1 - roc1$specificities, TPR = roc1$sensitivities,
+             Type = "mild", LineType = "dashed"),
+  data.frame(FPR = 1 - roc2$specificities, TPR = roc2$sensitivities,
+             Type = "moderate_to_severe", LineType = "dashed"),
+  data.frame(FPR = common_fpr, TPR = macro_tpr,
+             Type = "Macro Average", LineType = "solid"),
+  data.frame(FPR = 1 - roc_micro$specificities, TPR = roc_micro$sensitivities,
+             Type = "Micro Average", LineType = "solid")
+)
+
+# 画图
+ggplot(plot_data, aes(x = FPR, y = TPR)) +
+  geom_line(aes(color = Type, linetype = LineType), linewidth = 0.8) +  
+  geom_segment(data = auc_data,
+               aes(x = x_shortline_end, xend = x, y = y, yend = y,
+                   color = Type, linetype = LineType),  # 添加短线类型的映射
+               size = 0.8) + 
+  geom_text(
+    data = auc_data,
+    aes(x = x, y = y, 
+        label = sprintf("%s (AUC=%.3f)", Type, AUC),
+        color = Type),
+    hjust = 0, size = 3.5, show.legend = FALSE, color = "black"
+  ) +
+  scale_linetype_manual(values = c("dashed" = "dashed", "solid" = "solid")) +  # 手动设置线型
+  scale_color_manual(
+    values = c(
+      "none" = "#E69F00",
+      "mild" = "#009E73",
+      "moderate_to_severe" = "#F0E442",
+      "Macro Average" = "#0072B2",
+      "Micro Average" = "#CC79A7"
+    )
+  ) +
+  labs(x = "False Positive Rate", y = "True Positive Rate",
+       title = "ROC Curves for XGBoost Model") +
+  theme_minimal() +
+  theme(
+    panel.grid.minor = element_blank(),
+    panel.border = element_rect(fill = NA, color = "gray80"),
+    legend.position = "none",
+    aspect.ratio = 1,
+    plot.title = element_text(hjust = 0.5)
+  ) +
+  coord_cartesian(clip = "off") +
+  geom_abline(intercept = 0, slope = 1, color = "gray60", linetype = "dashed", lwd = 0.5)
+
+
+###PR曲线--------------------------------
+library(PRROC)  # 用于计算PR曲线和PR AUC
+library(rlang)
+# 计算各分类的PR曲线和PR AUC
+pr0 <- pr.curve(
+  scores.class0 = pred_prob[true_labels == 0, 1],
+  scores.class1 = pred_prob[true_labels != 0, 1],
+  curve = TRUE
+)
+
+pr1 <- pr.curve(
+  scores.class0 = pred_prob[true_labels == 1, 2],
+  scores.class1 = pred_prob[true_labels != 1, 2],
+  curve = TRUE
+)
+
+pr2 <- pr.curve(
+  scores.class0 = pred_prob[true_labels == 2, 3],
+  scores.class1 = pred_prob[true_labels != 2, 3],
+  curve = TRUE
+)
+
+# 计算宏平均PR曲线
+# 统一插值到相同长度的召回率点
+common_recall <- seq(0, 1, length.out = 100)
+
+interp_precision <- function(pr_obj) {
+  # 预处理数据：去重并取平均精度
+  recall <- pr_obj$curve[, 1]
+  precision <- pr_obj$curve[, 2]
+  df <- aggregate(precision ~ recall, data = data.frame(recall, precision), FUN = mean)
+  df <- df[order(df$recall), ]  # 确保按recall升序排列
+  # 线性插值到公共recall点
+  approx(df$recall, df$precision, xout = common_recall, method = "linear", rule = 2)$y
+}
+
+macro_precision <- rowMeans(sapply(list(pr0, pr1, pr2), interp_precision), na.rm = TRUE)
+
+# 计算微平均PR AUC
+# 将所有类别的预测概率和真实标签合并
+micro_true <- c()
+micro_pred <- c()
+
+for (i in seq_along(true_labels)) {
+  k <- true_labels[i]
+  # 对于当前样本，将其所属类别的预测概率作为正类
+  micro_true <- c(micro_true, 1, 0, 0)
+  micro_pred <- c(micro_pred, 
+                  pred_prob[i, k + 1], 
+                  pred_prob[i, setdiff(1:3, k + 1)][1],  # 取一个非正类的概率
+                  pred_prob[i, setdiff(1:3, k + 1)][2]) # 取另一个非正类的概率
+}
+
+# 计算微平均PR曲线
+pr_micro <- pr.curve(
+  scores.class0 = micro_pred[micro_true == 1],
+  scores.class1 = micro_pred[micro_true == 0],
+  curve = TRUE
+)
+
+# 获取PR AUC值
+prauc0 <- pr0$auc.integral
+prauc1 <- pr1$auc.integral
+prauc2 <- pr2$auc.integral
+macro_prauc <- mean(c(prauc0, prauc1, prauc2))
+micro_prauc <- pr_micro$auc.integral
+
+# 准备标注数据
+prauc_data <- data.frame(
+  Type = c("none", "mild", "moderate_to_severe", "Macro Average", "Micro Average"),
+  PR_AUC = c(prauc0, prauc1, prauc2, macro_prauc, micro_prauc),
+  x = 0.70,  # x坐标位置
+  y = seq(0.25, by = -0.05, length.out = 5),  # y坐标位置
+  LineType = c("dashed", "dashed", "dashed", "solid", "solid")  # 线型
+)
+
+# 控制短线长度
+short_line_length <- 0.04
+prauc_data$x_shortline_end <- prauc_data$x - short_line_length
+
+# 准备绘图数据
+plot_data <- rbind(
+  data.frame(
+    Recall = pr0$curve[, 1], 
+    Precision = pr0$curve[, 2], 
+    Type = "none", 
+    LineType = "dashed"
+  ),
+  data.frame(
+    Recall = pr1$curve[, 1], 
+    Precision = pr1$curve[, 2],
+    Type = "mild", 
+    LineType = "dashed"
+  ),
+  data.frame(
+    Recall = pr2$curve[, 1], 
+    Precision = pr2$curve[, 2],
+    Type = "moderate_to_severe", 
+    LineType = "dashed"
+  ),
+  data.frame(
+    Recall = common_recall, 
+    Precision = macro_precision,
+    Type = "Macro Average", 
+    LineType = "solid"
+  ),
+  data.frame(
+    Recall = pr_micro$curve[, 1], 
+    Precision = pr_micro$curve[, 2],
+    Type = "Micro Average", 
+    LineType = "solid"
+  )
+)
+
+# 移除NaN值
+plot_data <- plot_data[!is.na(plot_data$Precision), ]
+
+# 绘制PR曲线图
+ggplot(plot_data, aes(x = Recall, y = Precision)) +
+  geom_line(aes(color = Type, linetype = LineType), linewidth = 0.8) +  
+  geom_segment(
+    data = prauc_data,
+    aes(x = x_shortline_end, xend = x, y = y, yend = y,
+        color = Type, linetype = LineType),
+    size = 0.8
+  ) + 
+  geom_text(
+    data = prauc_data,
+    aes(x = x, y = y, 
+        label = sprintf("%s (PR AUC=%.3f)", Type, PR_AUC),
+        color = Type),
+    hjust = 0, size = 3.5, show.legend = FALSE, color = "black"
+  ) +
+  scale_linetype_manual(values = c("dashed" = "dashed", "solid" = "solid")) +  
+  scale_color_manual(
+    values = c(
+      "none" = "#E69F00",
+      "mild" = "#009E73",
+      "moderate_to_severe" = "#F0E442",
+      "Macro Average" = "#0072B2",
+      "Micro Average" = "#CC79A7"
+    )
+  ) +
+  labs(
+    x = "Recall", 
+    y = "Precision",
+    title = "PR Curves for XGBoost Model",
+    subtitle = "Precision-Recall Trade-off Analysis"
+  ) +
+  theme_minimal() +
+  theme(
+    panel.grid.minor = element_blank(),
+    panel.border = element_rect(fill = NA, color = "gray80"),
+    legend.position = "none",
+    aspect.ratio = 1,
+    plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+    plot.subtitle = element_text(hjust = 0.5, size = 11, color = "gray50"),
+    axis.text = element_text(color = "black", size = 10),
+    axis.title = element_text(size = 12, face = "bold")
+  ) +
+  coord_cartesian(
+    xlim = c(0, 1), 
+    ylim = c(0, 1),
+    clip = "off"
+  ) +
+  scale_x_continuous(breaks = seq(0, 1, 0.2)) +
+  scale_y_continuous(breaks = seq(0, 1, 0.2))
+#------------------------------------个样本数值计算
+# 计算每个类别的评估指标
+calculate_class_metrics <- function(true_labels, pred_class, classes) {
+  # 确保为因子，级别相同
+  true_labels <- factor(true_labels, levels = classes)
+  pred_class <- factor(pred_class, levels = classes)
+  
+  metrics_list <- list()
+  
+  for(cls in classes) {
+    # 计算TP, FP, FN, TN
+    tp <- sum(true_labels == cls & pred_class == cls)
+    fp <- sum(true_labels != cls & pred_class == cls)
+    fn <- sum(true_labels == cls & pred_class != cls)
+    tn <- sum(true_labels != cls & pred_class != cls)
+    
+    # 计算指标
+    precision <- ifelse((tp + fp) > 0, tp / (tp + fp), 0)
+    recall <- ifelse((tp + fn) > 0, tp / (tp + fn), 0)  # Sensitivity/Recall相同
+    f1 <- ifelse((precision + recall) > 0, 
+                 2 * (precision * recall) / (precision + recall), 0)
+    
+    metrics_list[[as.character(cls)]] <- list(
+      Class = cls,
+      Precision = round(precision, 4),
+      Sensitivity = round(recall, 4),  # Sensitivity就是Recall
+      Recall = round(recall, 4),
+      F1_Score = round(f1, 4),
+      TP = tp,
+      FP = fp,
+      FN = fn,
+      TN = tn
+    )
+  }
+  
+  return(metrics_list)
+}
+
+# 计算宏平均
+calculate_macro_average <- function(metrics_list) {
+  n_classes <- length(metrics_list)
+  
+  macro_precision <- mean(sapply(metrics_list, function(x) x$Precision))
+  macro_recall <- mean(sapply(metrics_list, function(x) x$Recall))
+  macro_f1 <- mean(sapply(metrics_list, function(x) x$F1_Score))
+  
+  return(list(
+    Precision = round(macro_precision, 4),
+    Sensitivity = round(macro_recall, 4),
+    Recall = round(macro_recall, 4),
+    F1_Score = round(macro_f1, 4)
+  ))
+}
+
+# 计算微平均
+calculate_micro_average <- function(true_labels, pred_class, classes) {
+  true_labels <- factor(true_labels, levels = classes)
+  pred_class <- factor(pred_class, levels = classes)
+  
+  # 汇总所有类别的TP, FP, FN
+  total_tp <- 0
+  total_fp <- 0
+  total_fn <- 0
+  
+  for(cls in classes) {
+    tp <- sum(true_labels == cls & pred_class == cls)
+    fp <- sum(true_labels != cls & pred_class == cls)
+    fn <- sum(true_labels == cls & pred_class != cls)
+    
+    total_tp <- total_tp + tp
+    total_fp <- total_fp + fp
+    total_fn <- total_fn + fn
+  }
+  
+  # 计算微平均指标
+  micro_precision <- ifelse((total_tp + total_fp) > 0, 
+                            total_tp / (total_tp + total_fp), 0)
+  micro_recall <- ifelse((total_tp + total_fn) > 0, 
+                         total_tp / (total_tp + total_fn), 0)
+  micro_f1 <- ifelse((micro_precision + micro_recall) > 0,
+                     2 * (micro_precision * micro_recall) / 
+                       (micro_precision + micro_recall), 0)
+  
+  return(list(
+    Precision = round(micro_precision, 4),
+    Sensitivity = round(micro_recall, 4),
+    Recall = round(micro_recall, 4),
+    F1_Score = round(micro_f1, 4),
+    Total_TP = total_tp,
+    Total_FP = total_fp,
+    Total_FN = total_fn
+  ))
+}
+
+# 准备数据
+classes <- c("0", "1", "2")  # 根据您的类别名称调整
+
+# 计算训练集指标
+train_pred_class <- max.col(train_prob) - 1
+train_metrics <- calculate_class_metrics(train_data$cap_lev, train_pred_class, classes)
+train_macro <- calculate_macro_average(train_metrics)
+train_micro <- calculate_micro_average(train_data$cap_lev, train_pred_class, classes)
+
+# 计算验证集指标
+val_pred_class <- max.col(val_prob) - 1
+val_metrics <- calculate_class_metrics(val_data$cap_lev, val_pred_class, classes)
+val_macro <- calculate_macro_average(val_metrics)
+val_micro <- calculate_micro_average(val_data$cap_lev, val_pred_class, classes)
+
+
+for(cls in classes) {
+  m <- train_metrics[[cls]]
+  cat(sprintf("  %-5s %-10.4f %-12.4f %-8.4f %-9.4f %-6d %-5d %-5d\n", 
+              m$Class, m$Precision, m$Sensitivity, m$Recall, m$F1_Score,
+              m$TP, m$FP, m$FN))
+}
+cat("\n汇总指标：\n")
+cat(sprintf("宏平均：Precision=%.4f, Sensitivity=%.4f, Recall=%.4f, F1-Score=%.4f\n",
+            train_macro$Precision, train_macro$Sensitivity, 
+            train_macro$Recall, train_macro$F1_Score))
+cat(sprintf("微平均：Precision=%.4f, Sensitivity=%.4f, Recall=%.4f, F1-Score=%.4f\n",
+            train_micro$Precision, train_micro$Sensitivity,
+            train_micro$Recall, train_micro$F1_Score))
+
+# 修正分隔线部分的代码
+cat("\n")
+cat(rep("═", 60), sep = "", "\n")
+cat("                     模型评估指标报告\n")
+cat(rep("═", 60), sep = "", "\n\n")
+
+cat("训练集评估结果：\n")
+cat(rep("─", 50), sep = "", "\n")
+cat("各分类指标：\n")
+cat("Class  Precision  Sensitivity  Recall  F1-Score    TP    FP    FN\n")
+cat(rep("─", 50), sep = "", "\n")
+for(cls in classes) {
+  m <- train_metrics[[cls]]
+  cat(sprintf("  %-5s %-10.4f %-12.4f %-8.4f %-9.4f %-6d %-5d %-5d\n", 
+              m$Class, m$Precision, m$Sensitivity, m$Recall, m$F1_Score,
+              m$TP, m$FP, m$FN))
+}
+cat("\n汇总指标：\n")
+cat(sprintf("宏平均：Precision=%.4f, Sensitivity=%.4f, Recall=%.4f, F1-Score=%.4f\n",
+            train_macro$Precision, train_macro$Sensitivity, 
+            train_macro$Recall, train_macro$F1_Score))
+cat(sprintf("微平均：Precision=%.4f, Sensitivity=%.4f, Recall=%.4f, F1-Score=%.4f\n",
+            train_micro$Precision, train_micro$Sensitivity,
+            train_micro$Recall, train_micro$F1_Score))
+
+  cat("\n")
+  cat(rep("═", 60), sep = "", "\n")
+  cat("验证集评估结果：\n")
+  cat(rep("─", 50), sep = "", "\n")
+  cat("各分类指标：\n")
+  cat("Class  Precision  Sensitivity  Recall  F1-Score    TP    FP    FN\n")
+  cat(rep("─", 50), sep = "", "\n")
+  for(cls in classes) {
+    m <- val_metrics[[cls]]
+    cat(sprintf("  %-5s %-10.4f %-12.4f %-8.4f %-9.4f %-6d %-5d %-5d\n", 
+                m$Class, m$Precision, m$Sensitivity, m$Recall, m$F1_Score,
+                m$TP, m$FP, m$FN))
+  }
+  cat("\n汇总指标：\n")
+  cat(sprintf("宏平均：Precision=%.4f, Sensitivity=%.4f, Recall=%.4f, F1-Score=%.4f\n",
+              val_macro$Precision, val_macro$Sensitivity, 
+              val_macro$Recall, val_macro$F1_Score))
+  cat(sprintf("微平均：Precision=%.4f, Sensitivity=%.4f, Recall=%.4f, F1-Score=%.4f\n",
+              val_micro$Precision, val_micro$Sensitivity,
+              val_micro$Recall, val_micro$F1_Score))
+  cat("\n")
+  cat(sprintf("总样本数：%d\n", length(val_data$cap_lev)))
+  cat(sprintf("总TP数：%d, 总FP数：%d, 总FN数：%d\n", 
+              train_micro$Total_TP, train_micro$Total_FP, train_micro$Total_FN))
+  cat(rep("═", 60), sep = "", "\n")
+  
+  # 表格部分修正
+  cat("\n验证集分类性能汇总表：\n")
+  cat(paste0("+", paste0(rep("-", 55), collapse = ""), "+\n"))
+  cat("| 类别 | 精确率 | 灵敏度 | 召回率 | F1分数 | 支持数 |\n")
+  cat(paste0("+", paste0(rep("-", 55), collapse = ""), "+\n"))
+  
+  # 计算每个类别的支持数（样本数）
+  for(cls in classes) {
+    m <- val_metrics[[cls]]
+    support <- m$TP + m$FN
+    cat(sprintf("|  %-3s |  %-5.3f |  %-5.3f |  %-5.3f |  %-5.3f |  %-6d |\n",
+                m$Class, m$Precision, m$Sensitivity, m$Recall, 
+                m$F1_Score, support))
+  }
+  
+  # 添加宏平均行
+  total_support <- length(val_data$cap_lev)
+  cat(paste0("+", paste0(rep("-", 55), collapse = ""), "+\n"))
+  cat(sprintf("| 宏平均 |  %-5.3f |  %-5.3f |  %-5.3f |  %-5.3f |  %-6d |\n",
+              val_macro$Precision, val_macro$Sensitivity, 
+              val_macro$Recall, val_macro$F1_Score, total_support))
+  
+  # 添加微平均行
+  cat(sprintf("| 微平均 |  %-5.3f |  %-5.3f |  %-5.3f |  %-5.3f |  %-6d |\n",
+              val_micro$Precision, val_micro$Sensitivity,
+              val_micro$Recall, val_micro$F1_Score, total_support))
+  cat(paste0("+", paste0(rep("-", 55), collapse = ""), "+\n"))
+  
+  # 计算每个类别的Specificity
+  calculate_specificity <- function(true_labels, pred_class, classes) {
+    # 确保为因子，级别相同
+    true_labels <- factor(true_labels, levels = classes)
+    pred_class <- factor(pred_class, levels = classes)
+    
+    specificity_list <- list()
+    
+    for(cls in classes) {
+      # 对于当前类别，将其视为正类，其他类别为负类
+      # TN: 预测为负类且实际为负类
+      # FP: 预测为正类但实际为负类
+      
+      # 计算TN: 预测为负类且实际为负类的数量
+      tn <- sum(pred_class != cls & true_labels != cls)
+      
+      # 计算FP: 预测为正类但实际为负类的数量
+      fp <- sum(pred_class == cls & true_labels != cls)
+      
+      # 计算Specificity
+      specificity <- ifelse((tn + fp) > 0, tn / (tn + fp), 0)
+      
+      specificity_list[[cls]] <- round(specificity, 4)
+    }
+    
+    return(specificity_list)
+  }
+  
+  # 计算验证集的Specificity
+  val_pred_class <- max.col(val_prob) - 1
+  val_specificity <- calculate_specificity(val_data$cap_lev, val_pred_class, classes)
+  
+  # 简单打印结果
+  cat("\n各分类Specificity（特异度）：\n")
+  for(cls in classes) {
+    cat(sprintf("Class %s: %.4f\n", cls, val_specificity[[cls]]))
+  }
+  
+  # 也可以计算宏平均和微平均Specificity
+  macro_specificity <- mean(unlist(val_specificity))
+  
+  # 计算微平均Specificity
+  micro_tn_total <- 0
+  micro_fp_total <- 0
+  
+  for(cls in classes) {
+    # 计算每个类别的TN和FP
+    true_labels <- factor(val_data$cap_lev, levels = classes)
+    pred_class <- factor(val_pred_class, levels = classes)
+    
+    tn <- sum(pred_class != cls & true_labels != cls)
+    fp <- sum(pred_class == cls & true_labels != cls)
+    
+    micro_tn_total <- micro_tn_total + tn
+    micro_fp_total <- micro_fp_total + fp
+  }
+  
+  micro_specificity <- ifelse((micro_tn_total + micro_fp_total) > 0, 
+                              micro_tn_total / (micro_tn_total + micro_fp_total), 0)
+  
+  cat(sprintf("\n宏平均Specificity: %.4f\n", macro_specificity))
+  cat(sprintf("微平均Specificity: %.4f\n", round(micro_specificity, 4)))
+  
+  # 添加到之前的指标表格中（可选）
+  cat("\n完整指标表（包含Specificity）：\n")
+  cat("Class  Precision  Sensitivity  Specificity  F1-Score\n")
+  cat(rep("-", 55), sep = "", "\n")
+  
+  for(cls in classes) {
+    m <- val_metrics[[cls]]
+    cat(sprintf("  %-5s %-10.4f %-12.4f %-12.4f %-9.4f\n", 
+                cls, m$Precision, m$Sensitivity, val_specificity[[cls]], m$F1_Score))
+  }
+  
+  library(psych)
+  
+  # 准备数据（确保两个向量长度相同且都为数值型或因子型）
+  # 这里假设val_data$cap_lev已经是0,1,2的数值型
+  # val_pred_class也是0,1,2的数值型
+  
+  # 创建2列的矩阵
+  kappa_matrix <- cbind(as.numeric(val_data$cap_lev), as.numeric(val_pred_class))
+  
+  # 计算Cohen's Kappa
+  kappa_result <- cohen.kappa(kappa_matrix)
+  
+  # 直接返回结果（不cat）
+  list(
+    unweighted_kappa = kappa_result$kappa,
+    weighted_kappa = kappa_result$weighted.kappa,
+    confidence_interval = if(!is.null(kappa_result$confid)) kappa_result$confid[1, c(1,3)] else NULL
+  )
+  
+  #-------------------------------校准曲线
+  # 准备数据
+  pred_prob <- predict(xgb_model, dval, reshape = TRUE) %>% 
+    as.data.frame()
+  colnames(pred_prob) <- c("0", "1", "2")
+  
+  # 确保标签为因子
+  true_labels <- factor(val_data$cap_lev, levels = c("0", "1", "2"))
+  
+  # 转换为长格式
+  calibration_data <- pred_prob %>%
+    mutate(obs = true_labels) %>%
+    pivot_longer(
+      cols = -obs,
+      names_to = "pred_class",
+      values_to = "pred_prob"
+    ) %>%
+    mutate(
+      actual = as.integer(obs == pred_class),
+      pred_class = factor(pred_class, levels = c("0", "1", "2"))
+    )
+  
+  # 分箱处理
+  calibration_bins <- calibration_data %>%
+    group_by(pred_class) %>%
+    mutate(
+      prob_bin = cut(pred_prob, 
+                     breaks = seq(0, 1, 0.1),
+                     include.lowest = TRUE)
+    ) %>%
+    group_by(pred_class, prob_bin) %>%
+    summarise(
+      mean_pred = mean(pred_prob),
+      mean_obs = mean(actual),
+      n = n(),
+      .groups = 'drop'
+    ) %>%
+    filter(n >= 5)
+  
+  # 使用经典颜色：黄、绿、橙
+  classic_colors <- c(
+    "0" = "#0D47A1",  # 黄色
+    "1" = "#FF9800",  # 绿色
+    "2" = "#4CAF50"   # 橙色
+  )
+  
+  # 准备标注数据（只显示类别名称，去掉可靠性分数）
+  annotation_data <- data.frame(
+    pred_class = factor(c("0", "1", "2"), levels = c("0", "1", "2")),
+    x = 0.70,
+    y = seq(0.25, by = -0.05, length.out = 3),
+    label = c("Class 0", "Class 1", "Class 2")
+  )
+  
+  # 控制短线长度
+  short_line_length <- 0.04
+  annotation_data$x_shortline_end <- annotation_data$x - short_line_length
+  
+  # 绘制校准曲线
+  ggplot(calibration_bins, aes(x = mean_pred, y = mean_obs)) +
+    # 完美校准对角线
+    geom_abline(intercept = 0, slope = 1, color = "gray60", 
+                linetype = "dashed", size = 0.5) +
+    
+    # 绘制校准曲线
+    geom_line(aes(color = pred_class), size = 0.8) +
+    geom_point(aes(color = pred_class, size = n), alpha = 0.7) +
+    
+    # 绘制连接标签的短线
+    geom_segment(
+      data = annotation_data,
+      aes(x = x_shortline_end, xend = x, y = y, yend = y, color = pred_class),
+      size = 0.8
+    ) +
+    
+    # 添加标签（只显示类别名称）
+    geom_text(
+      data = annotation_data,
+      aes(x = x, y = y, label = label, color = pred_class),
+      hjust = 0, size = 3.5, show.legend = FALSE
+    ) +
+    
+    # 设置颜色和尺寸
+    scale_color_manual(values = classic_colors) +
+    scale_size_continuous(range = c(2, 6)) +
+    
+    # 坐标轴和标题
+    labs(
+      x = "Mean Predicted Probability",
+      y = "Observed Proportion",
+      title = "Calibration Curves for XGBoost Model",
+      color = "Class",
+      size = "Sample Size"
+    ) +
+    
+    # 主题设置
+    theme_minimal() +
+    theme(
+      panel.grid.minor = element_blank(),
+      panel.border = element_rect(fill = NA, color = "gray80"),
+      legend.position = "none",  # 移除图例
+      aspect.ratio = 1,
+      plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+      axis.text = element_text(color = "black", size = 10),
+      axis.title = element_text(size = 12, face = "bold")
+    ) +
+    
+    # 坐标轴范围
+    coord_cartesian(
+      xlim = c(0, 1), 
+      ylim = c(0, 1),
+      clip = "off"
+    ) +
+    scale_x_continuous(breaks = seq(0, 1, 0.2)) +
+    scale_y_continuous(breaks = seq(0, 1, 0.2))
+
+
+#shap------------------------------------------------------------
+library(shapviz)
+features <- data[, -which(names(data) == "cap_lev")]
+shap_values <- shapviz(xgb_model, X_pred = as.matrix(features))
+
+
+### 瀑布图（单个样本）
+sv_waterfall(shap_values, row_id = 1)
+
+### 蜂群图（全局 SHAP 分布）
+sv_importance(shap_values, kind = "beeswarm")
+
+### 特征重要性条形图
+sv_importance(shap_values, kind = "bar")
+
+### 力图（单个样本）
+sv_force(shap_values, row_id = 1)
+
+###依赖图
+# 1. 设置要分析的特征名
+feature_name <- "UA"  # 改为你要分析的特征，如"age"、"BMI"等
+
+# 2. 生成该特征的依赖图（无交互）
+p <- sv_dependence(shap_values, 
+                   v = feature_name,   # 要分析的特征
+                   color_var = NULL,   # 无交互特征
+                   alpha = 0.3)      # 点透明度
+# 3. 在RStudio Plot界面显示图像
+print(p)  # 这行代码确保在Plot窗口显示图形
+
+
+
