@@ -1,0 +1,217 @@
+rm(list = ls())
+DATA <- read.csv("after_wash_28.csv")
+data <- DATA
+View(data)
+
+
+data$cap_lev <- factor(data$cap_lev, levels = c(0,1,2), ordered = TRUE) # 指定该因子为有序
+str(data) # 查看结构，确认是有序因子
+
+#随机划分数据集为训练集和验证集
+set.seed(123)
+train_index <- createDataPartition(y=data$cap_lev,p=0.7,list=F)
+train_data <- data[train_index, ]#训练集
+val_data <- data[-train_index,]#验证集
+#查看划分数据集的因变量分布情况
+table(train_data$cap_lev)
+table(train_data$mafld)#不用额外处理
+###lasso筛选特征变量------------------------------------------------------------------
+#标准化
+cont_vars <- sapply(train_data, is.numeric) & names(train_data) != "cap_lev" &names(train_data) != "gender" & names(train_data) != "dm"& names(train_data) != "hbp"& names(train_data) != "mafld"
+train_data[, cont_vars] <- scale(train_data[, cont_vars])
+train_data <- train_data[, -which(names(train_data) == "cap_lev")]
+View(train_data)
+str(train_data)
+
+#构建自变量因变量
+colnames(train_data)[42]
+lasso_data <- train_data
+set.seed(123)
+x<-as.matrix(lasso_data[,-42])
+y<-lasso_data[,42]
+#使用glmnet()建模lasso
+alpha1_fit<-glmnet(x,y,alpha=1,family="multinomial",nlambda=100)
+plot(alpha1_fit,xvar="lambda",label=TRUE)
+#交叉验证曲线。回归mae，分类deviance
+set.seed(123)
+alpha1.fit.cv<-cv.glmnet(x,y,nfold=10,alpha=1,family="binomial")
+plot(alpha1.fit.cv)
+#筛选结果
+print(alpha1.fit.cv)
+coef(alpha1.fit.cv,s=alpha1.fit.cv$lambda.1se)
+feature_all<-as.data.frame(as.matrix(coef(alpha1.fit.cv,s=alpha1.fit.cv$lambda.1se)))
+colnames(feature_all)<-"coff"
+feature_opt<-feature_all%>%filter(abs(coff)>0)
+rownames(feature_opt)
+
+#RFE筛选
+DATA <- read.csv("after_wash_all.csv")[-1]
+#1.2,2,2000 2400 2200,0.72,1 0.75
+data <- DATA
+#bmi小于28
+data <- data %>%
+  filter(BMI<28)
+
+data$cap_lev <- ifelse(data$cap_lev == "none", 0,
+                       ifelse(data$cap_lev == "mild", 1, 2))
+table(data$cap_lev)
+
+# 加载必要的包
+library(caret)
+library(randomForest)
+library(dplyr)
+data <- data[, !colnames(data) %in% c("hbp_q", "hba1c_na","hdl_n","tri_chol_n","bmi_n","waist_n","dm_q","dm","eGFR","cap")]
+
+
+# 设置随机种子保证可重复性
+# 1. 准备数据
+# 确保结局变量为因子（分类问题）
+data$cap_lev <- as.factor(data$cap_lev)
+table(data$cap_lev)
+
+# 分离特征和结局变量
+x <- data %>% dplyr::select(-cap_lev)
+y <- data$cap_lev
+# ==================== 设置更密集的特征子集大小 ====================
+# 计算总特征数量
+num_features <- ncol(x)
+cat("\n总特征数量:", num_features, "\n")
+
+# 创建更密集的sizes序列
+# 从1到30（或特征总数，取较小值），步长为2
+sizes_dense <- seq(1, min(30, num_features), by = 2)
+cat("密集sizes（步长2）:\n")
+print(sizes_dense)
+
+sample_size <- min(10000, nrow(x))
+cat("\n将使用", sample_size, "个样本进行特征筛选\n")
+cat("原因：", 
+    ifelse(nrow(x) > 10000, 
+           "数据量太大，使用子样本加速计算",
+           "数据量适中，使用全部数据"), "\n")
+
+# 随机抽取样本
+set.seed(123)
+sample_indices <- sample(1:nrow(x), sample_size)
+x_subset <- x[sample_indices, ]
+y_subset <- y[sample_indices]
+# 检查子样本的类别分布
+cat("\n子样本类别分布:\n")
+print(table(y_subset))
+cat("各类别比例:\n")
+print(prop.table(table(y_subset)))
+
+
+# ==================== 设置RFES控制参数 ====================
+# 使用分层抽样确保每个折叠都有所有类别
+set.seed(123)
+folds <- createFolds(y_subset, k = 5, list = TRUE, returnTrain = FALSE)
+
+# 检查每个折叠中的类别分布（确保没有折叠只包含一个类别）
+cat("\n检查每个折叠中的类别分布:\n")
+for(i in 1:length(folds)) {
+  fold_classes <- table(y_subset[folds[[i]]])
+  cat(sprintf("折叠%d: 0=%d, 1=%d, 2=%d\n", 
+              i, fold_classes["0"], fold_classes["1"], fold_classes["2"]))
+}
+
+ctrl <- rfeControl(
+  functions = rfFuncs,
+  method = "cv",
+  number = 5,
+  index = folds,  # 使用预定义的折叠（分层抽样）
+  verbose = TRUE,  # 显示详细过程
+  returnResamp = "final",
+  saveDetails = TRUE,
+  allowParallel = FALSE  # 先不使用并行，便于调试
+)
+
+# ==================== 运行RFES ====================
+cat("\n开始运行RFES特征筛选...\n")
+cat("样本大小:", nrow(x_subset), "\n")
+cat("特征数量:", ncol(x_subset), "\n")
+cat("将测试的特征子集数量:", length(sizes_dense), "\n")
+
+rf_profile <- rfe(
+  x = x_subset,
+  y = y_subset,
+  sizes = sizes_dense,
+  rfeControl = ctrl,
+  ntree = 100,        # 随机森林的树数量
+  metric = "Accuracy", # 评估指标
+  maximize = TRUE     # 是否最大化评估指标
+)
+
+# ==================== 查看结果 ====================
+cat("\nRFES结果摘要:\n")
+print(rf_profile)
+
+# 获取最优特征
+optimal_vars <- predictors(rf_profile)
+cat("\n最优特征数量:", length(optimal_vars))
+cat("\n最优特征:\n")
+print(optimal_vars)
+
+# 获取特征重要性
+var_imp <- varImp(rf_profile)
+cat("\n特征重要性排序:\n")
+print(var_imp)
+
+# ==================== 优化绘图 ====================
+# 使用ggplot2绘制专业图表
+library(ggplot2)
+library(scales)  # 用于百分比格式
+
+# 准备数据
+plot_data <- rf_profile$results
+best_idx <- which.max(plot_data$Accuracy)
+best_size <- plot_data$Variables[best_idx]
+best_acc <- plot_data$Accuracy[best_idx]
+
+# 创建图表
+# 创建图表
+p <- ggplot(plot_data, aes(x = Variables, y = Accuracy)) +
+  # 主线条和点
+  geom_line(color = "steelblue", size = 1.2) +
+  geom_point(color = "steelblue", size = 3, shape = 19) +
+  
+  # 最佳点突出显示
+  geom_point(data = plot_data[best_idx, ], 
+             aes(x = Variables, y = Accuracy),
+             color = "red", size = 5, shape = 17) +
+  
+  # 标准差带
+  geom_ribbon(aes(ymin = Accuracy - AccuracySD, 
+                  ymax = Accuracy + AccuracySD),
+              alpha = 0.2, fill = "steelblue") +
+  
+  # 最佳特征数垂直线
+  geom_vline(xintercept = best_size, 
+             linetype = "dashed", color = "red", size = 1) +
+  
+  # 坐标轴和标题
+    labs(title = "Feature Selection via RFE using Random Forest Classifier",
+       x = "Number of Features",
+       y = "Accuracy (Cross-Validation)") +
+  
+  # 主题设置
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 16),
+    panel.grid.major = element_line(color = "gray90"),
+    panel.grid.minor = element_line(color = "gray95")
+  ) +
+  
+  # 坐标轴格式
+  scale_x_continuous(breaks = plot_data$Variables) +
+  scale_y_continuous(labels = percent_format(accuracy = 0.1),
+                     limits = c(min(plot_data$Accuracy) - 0.01,
+                                max(plot_data$Accuracy) + 0.01))
+
+print(p)
+
+# 1. 获取最优特征子集
+optimal_vars <- predictors(rf_profile)
+
+cat("\n最优特征集合:\n")
+cat(paste(1:length(optimal_vars), optimal_vars, sep = ". "), sep = "\n")
