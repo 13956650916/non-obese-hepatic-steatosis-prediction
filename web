@@ -1,0 +1,355 @@
+from shiny import reactive, req
+from shiny.express import ui, render, input
+from shinywidgets import render_plotly
+import matplotlib.pyplot as plt
+import plotly.express as px
+import pandas as pd
+import datetime
+
+import xgboost as xgb
+import numpy as np
+import shap
+
+model14 = xgb.Booster()
+model14.load_model("xgb_14_class.json")
+model14.feature_names = ["Age", "SBP", "ALT", "ALB", "LDL", "tyg", "Scr", "BMI", "AST", "UA", "TG", "ALP", "WC", "cmets"]
+explainer14 = shap.Explainer(model14)
+
+model9 = xgb.Booster()
+model9.load_model("xgb_9_class.json")
+model9.feature_names = ["Age", "SBP", "ALT", "tyg", "BMI", "WC", "TG", "AST", "cmets"]
+explainer9 = shap.Explainer(model9)
+
+prob = None
+shap_values = None
+lang = 'ENG'
+
+# ui.include_css('style.css')
+ui.head_content(ui.include_css("custom.css"))
+
+if lang == 'CHN':
+    ui.page_opts(title="肝功能预测")
+else:
+    ui.page_opts(title="Prediction of Hepatic Steatosis Grading in Non-obese Individuals")
+
+with ui.sidebar(bg="#f8f8f8"):
+    with ui.tooltip():
+        ui.input_radio_buttons("type", "Screening Strategy (Priority)", {'Ordinary (9 items)': "Streamlined (9 inputs)", 'Detailed (14 items)': "Comprehensive (14 inputs)"}, selected="Detailed (14 items)")
+        """
+Streamlined Screening (Easier, 9 inputs)
+
+For use when advanced labs (Albumin, Uric Acid, etc.) are unavailable.
+
+Comprehensive Screening (More accurate, 14 inputs)
+
+For use when the full panel of routine and advanced labs is available.
+        """
+
+    @render.ui
+    def getoptions():
+        type = input.type()
+        if lang == 'CHN':
+            if type == 'Detailed (14 items)':
+                options = ui.div(
+                    ui.input_numeric("Age", "年龄 (岁)", value=30, min=18, max=120, step=1),
+                    ui.input_radio_buttons("sex", "性别", ["男", "女"], selected="男"),
+                    ui.input_numeric("weight", "体重 (kg)", value=65, min=30, max=300, step=1),
+                    ui.input_numeric("height", "身高 (m)", value=1.7, min=1.0, max=2.5, step=0.1),
+                    ui.input_numeric("WC", "腰围 (cm)", value=80, min=40, max=200, step=1),
+                    ui.input_numeric("ALT", "谷丙转氨酶ALT (U/L)", value=20, min=0, max=1000, step=1),
+                    ui.input_numeric("AST", "谷草转氨酶AST (U/L)", value=15, min=0, max=1000, step=1),
+                    ui.input_numeric("FBG", "空腹血糖FBG (mmol/L)", value=5.0, min=2.0, max=30.0, step=0.1),
+                    ui.input_numeric("TG", "甘油三酯TG (mmol/L)", value=1.5, min=0.1, max=30.0, step=0.1),
+                    ui.input_numeric("ALP", "碱性磷酸酶ALP (U/L)", value=80, min=20, max=1500, step=1),
+                    ui.input_numeric("Scr", "血肌酐Scr (μmol/L)", value=70, min=10, max=1500, step=1),
+                    ui.input_numeric("LDL", "低密度脂蛋白LDL (mmol/L)", value=2.5, min=0.5, max=15.0, step=0.1),
+                    ui.input_numeric("HDL", "高密度脂蛋白HDL (mmol/L)", value=1.2, min=0.1, max=5.0, step=0.1),
+                    ui.input_numeric("SBP", "收缩压sbp (mmHg)", value=120, min=50, max=250, step=1),
+                    ui.input_numeric("dbp", "舒张压dbp (mmHg)", value=80, min=30, max=150, step=1),
+                    ui.input_numeric("UA", "尿酸UA (μmol/L)", value=300, min=50, max=1000, step=1),
+                    ui.input_numeric("ALB", "白蛋白ALB (g/L)", value=45, min=10, max=100, step=1),
+                    ui.input_action_button("submit", "提交"),
+                    id='options')
+            elif type == 'Ordinary (9 items)':
+                options = ui.div(
+                    ui.input_numeric("Age", "年龄 (岁)", value=30, min=18, max=120, step=1),
+                    ui.input_radio_buttons("sex", "性别", ["男", "女"], selected="男"),
+                    ui.input_numeric("weight", "体重 (kg)", value=65, min=30, max=300, step=1),
+                    ui.input_numeric("height", "身高 (m)", value=1.7, min=1.0, max=2.5, step=0.1),
+                    ui.input_numeric("WC", "腰围 (cm)", value=80, min=40, max=200, step=1),
+                    ui.input_numeric("ALT", "谷丙转氨酶ALT (U/L)", value=20, min=0, max=1000, step=1),
+                    ui.input_numeric("AST", "谷草转氨酶AST (U/L)", value=15, min=0, max=1000, step=1),
+                    ui.input_numeric("FBG", "空腹血糖FBG (mmol/L)", value=5.0, min=2.0, max=30.0, step=0.1),
+                    ui.input_numeric("TG", "甘油三酯TG (mmol/L)", value=1.5, min=0.1, max=30.0, step=0.1),
+                    # ui.input_numeric("ALP", "碱性磷酸酶ALP (U/L)", value=80, min=20, max=1500, step=1),
+                    # ui.input_numeric("Scr", "血肌酐Scr (μmol/L)", value=70, min=10, max=1500, step=1),
+                    # ui.input_numeric("LDL", "低密度脂蛋白LDL (mmol/L)", value=2.5, min=0.5, max=15.0, step=0.1),
+                    ui.input_numeric("HDL", "高密度脂蛋白HDL (mmol/L)", value=1.2, min=0.1, max=5.0, step=0.1),
+                    ui.input_numeric("SBP", "收缩压sbp (mmHg)", value=120, min=50, max=250, step=1),
+                    ui.input_numeric("dbp", "舒张压dbp (mmHg)", value=80, min=30, max=150, step=1),
+                    # ui.input_numeric("UA", "尿酸UA (μmol/L)", value=300, min=50, max=1000, step=1),
+                    # ui.input_numeric("ALB", "白蛋白ALB (g/L)", value=45, min=10, max=100, step=1),
+                    ui.input_action_button("submit", "提交"),
+                    id='options')
+        elif lang == 'ENG':
+            if type == 'Detailed (14 items)':
+                options = ui.div(ui.input_numeric("Age", "Age (Year)", value=30, min=18, max=120, step=1),
+                    ui.input_radio_buttons("sex", "Sex", ["Male", "Female"], selected=None),
+                    ui.input_numeric("weight", "Weight (kg)", value=65, min=30, max=300, step=1),
+                    ui.input_numeric("height", "Height (m)", value=1.7, min=1.0, max=2.5, step=0.1),
+                    ui.input_numeric("WC", "Waist Circumference, WC (cm)", value=80, min=40, max=200, step=1),
+                    ui.input_numeric("ALT", "Alanine Aminotransferase, ALT (U/L)", value=20, min=0, max=1000, step=1),
+                    ui.input_numeric("AST", "Aspartate Aminotransferase, AST (U/L)", value=15, min=0, max=1000, step=1),
+                    ui.input_numeric("FBG", "Fasting Blood Glucose, FBG (mmol/L)", value=5.0, min=2.0, max=30.0, step=0.1),
+                    ui.input_numeric("TG", "Triglycerides, TG (mmol/L)", value=1.5, min=0.1, max=30.0, step=0.1),
+                    ui.input_numeric("ALP", "Alkaline Phosphatase, ALP (U/L)", value=80, min=20, max=1500, step=1),
+                    ui.input_numeric("Scr", "Serum Creatinine, Scr (μmol/L)", value=70, min=10, max=1500, step=1),
+                    ui.input_numeric("LDL", "Low-Density Lipoprotein, LDL (mmol/L)", value=2.5, min=0.5, max=15.0, step=0.1),
+                    ui.input_numeric("HDL", "High-Density Lipoprotein, HDL (mmol/L)", value=1.2, min=0.1, max=5.0, step=0.1),
+                    ui.input_numeric("SBP", "Systolic Blood Pressure, SBP (mmHg)", value=120, min=50, max=250, step=1),
+                    ui.input_numeric("dbp", "Diastolic Blood Pressure, DBP (mmHg)", value=80, min=30, max=150, step=1),
+                    ui.input_numeric("UA", "Uric Acid, UA (μmol/L)", value=300, min=50, max=1000, step=1),
+                    ui.input_numeric("ALB", "Albumin, ALB (g/L)", value=45, min=10, max=100, step=1),
+                    ui.input_action_button("submit", "Submit"),
+                    id = 'options')
+            elif type == 'Ordinary (9 items)':
+                options = ui.div(ui.input_numeric("Age", "Age (Year)", value=30, min=18, max=120, step=1),
+                    ui.input_radio_buttons("sex", "Sex", ["Male", "Female"], selected=None),
+                    ui.input_numeric("weight", "Weight (kg)", value=65, min=30, max=300, step=1),
+                    ui.input_numeric("height", "Height (m)", value=1.7, min=1.0, max=2.5, step=0.1),
+                    ui.input_numeric("WC", "Waist Circumference, WC (cm)", value=80, min=40, max=200, step=1),
+                    ui.input_numeric("ALT", "Alanine Aminotransferase, ALT (U/L)", value=20, min=0, max=1000, step=1),
+                    ui.input_numeric("AST", "Aspartate Aminotransferase, AST (U/L)", value=15, min=0, max=1000, step=1),
+                    ui.input_numeric("FBG", "Fasting Blood Glucose, FBG (mmol/L)", value=5.0, min=2.0, max=30.0, step=0.1),
+                    ui.input_numeric("TG", "Triglycerides, TG (mmol/L)", value=1.5, min=0.1, max=30.0, step=0.1),
+                    # ui.input_numeric("ALP", "Alkaline Phosphatase, ALP (U/L)", value=80, min=20, max=1500, step=1),
+                    # ui.input_numeric("Scr", "Serum Creatinine, Scr (μmol/L)", value=70, min=10, max=1500, step=1),
+                    # ui.input_numeric("LDL", "Low-Density Lipoprotein, LDL (mmol/L)", value=2.5, min=0.5, max=15.0, step=0.1),
+                    ui.input_numeric("HDL", "High-Density Lipoprotein, HDL (mmol/L)", value=1.2, min=0.1, max=5.0, step=0.1),
+                    ui.input_numeric("SBP", "Systolic Blood Pressure, SBP (mmHg)", value=120, min=50, max=250, step=1),
+                    ui.input_numeric("dbp", "Diastolic Blood Pressure, DBP (mmHg)", value=80, min=30, max=150, step=1),
+                    # ui.input_numeric("UA", "Uric Acid, UA (μmol/L)", value=300, min=50, max=1000, step=1),
+                    # ui.input_numeric("ALB", "Albumin, ALB (g/L)", value=45, min=10, max=100, step=1),
+                    ui.input_action_button("submit", "Submit"),
+                    id = 'options')
+        return options
+
+
+# ui.input_numeric("SBP", "SBP", 115)
+# ui.input_numeric("ALT", "ALT", 13)
+# ui.input_numeric("ALB", "ALB", 46.52)
+# ui.input_numeric("LDL", "LDL", 2.57)
+# ui.input_numeric("tyg", "tyg", 7.446193)
+# ui.input_numeric("Scr", "Scr", 48)
+# ui.input_numeric("BMI", "BMI", 17.01)
+# ui.input_numeric("AST", "AST", 19.0)
+# ui.input_numeric("UA", "UA", 254.0)
+# ui.input_numeric("TG", "TG", 0.44)
+# ui.input_numeric("ALP", "ALP", 59)
+# ui.input_numeric("WC", "WC", 68.1)
+# ui.input_numeric("cmets", "cmets", -0.754698)
+
+with ui.card():
+    with ui.card():
+        if lang == 'CHN':
+            ui.panel_title(title="预测结果")
+        else:
+            ui.panel_title(title="Prediction Results")
+
+        @render.ui
+        @reactive.event(input.submit)
+        def notification():
+            if input.type() == "Ordinary (9 items)":
+                return ui.markdown("""##### Using the Core Feature Model
+This prediction is based on 9 routinely available clinical variables. If more test results become available, please enter all variables to use the full model for higher accuracy.
+""")
+
+
+        @render_plotly
+        @reactive.event(input.submit)
+        def plot():
+            global prob, shap_values
+
+            if input.type() == 'Detailed (14 items)':
+                Age = input.Age()
+                sex = input.sex()
+                weight = input.weight()
+                height = input.height()
+                WC = input.WC()
+                ALT = input.ALT()
+                AST = input.AST()
+                FBG = input.FBG()
+                TG = input.TG()
+                ALP = input.ALP()
+                Scr = input.Scr()
+                LDL = input.LDL()
+                HDL = input.HDL()
+                SBP = input.SBP()
+                dbp = input.dbp()
+                UA = input.UA()
+                ALB = input.ALB()
+
+                BMI = weight / height ** 2
+                tyg = np.log(TG * 88.57 * FBG * 18.02 / 2)
+                MAP = (SBP + 2 * dbp) / 3
+                if sex == "男" or sex == "Male":
+                    if Age < 60:
+                        cmets = 60-2.9092+0.0262*WC+0.3098*TG-0.944*HDL+0.0097*MAP+0.0745*FBG
+                    else:
+                        cmets = 60-2.3741+0.0264*WC+0.4933*TG-0.999*HDL+0.0054*MAP+0.0821*FBG
+                elif sex == "女" or sex == "Female":
+                    if Age < 60:
+                        cmets = 60-2.4981+0.0199*WC+0.5218*TG-0.8616*HDL+0.0110*MAP+0.1074*FBG
+                    else:
+                        cmets = 60-0.5682+0.0153*WC+0.4587*TG-1.3567*HDL+0.0036*MAP+0.0688*FBG
+                else:
+                    raise ValueError("Invalid sex, should be 'Male' or 'Female'")
+
+                df = pd.DataFrame([[Age, SBP, ALT, ALB, LDL, tyg, Scr, BMI, AST, UA, TG, ALP, WC, cmets]], columns=model14.feature_names)
+
+                print(datetime.datetime.now(), df)
+
+                prob = model14.predict(xgb.DMatrix(data=df, feature_names=model14.feature_names))[0]
+
+                shap_values = explainer14(df.iloc[:1])[0]
+
+                df = pd.DataFrame(prob.T, columns=['prob'])
+                df['label'] = ["None","Mild","Moderate to Severe"]
+
+                # pieplot = px.pie(values=[prob[0], prob[1], prob[2]], names=["无", "轻度", "中度以上"], color=["无", "轻度", "中度以上"] ,color_discrete_map={"无": "green", "轻度": "yellow", "中度以上": "red"}, category_orders={"无": [0], "轻度": [1], "中度以上": [2]})
+
+                pieplot = px.pie(df,values='prob',names='label',color='label',color_discrete_map={'None':'green','Mild':'yellow','Moderate to Severe':'red'}, category_orders={'label':['None','Mild','Moderate to Severe']})
+
+                pieplot.update_traces(textposition='inside', textinfo='percent+label')
+
+                return pieplot
+            
+            elif input.type() == 'Ordinary (9 items)':
+                Age = input.Age()
+                sex = input.sex()
+                weight = input.weight()
+                height = input.height()
+                WC = input.WC()
+                ALT = input.ALT()
+                AST = input.AST()
+                FBG = input.FBG()
+                TG = input.TG()
+                # ALP = input.ALP()
+                # Scr = input.Scr()
+                # LDL = input.LDL()
+                HDL = input.HDL()
+                SBP = input.SBP()
+                dbp = input.dbp()
+                # UA = input.UA()
+                # ALB = input.ALB()
+
+                BMI = weight / height ** 2
+                tyg = np.log(TG * 88.57 * FBG * 18.02 / 2)
+                MAP = (SBP + 2 * dbp) / 3
+                if sex == "男" or sex == "Male":
+                    if Age < 60:
+                        cmets = 60-2.9092+0.0262*WC+0.3098*TG-0.944*HDL+0.0097*MAP+0.0745*FBG
+                    else:
+                        cmets = 60-2.3741+0.0264*WC+0.4933*TG-0.999*HDL+0.0054*MAP+0.0821*FBG
+                elif sex == "女" or sex == "Female":
+                    if Age < 60:
+                        cmets = 60-2.4981+0.0199*WC+0.5218*TG-0.8616*HDL+0.0110*MAP+0.1074*FBG
+                    else:
+                        cmets = 60-0.5682+0.0153*WC+0.4587*TG-1.3567*HDL+0.0036*MAP+0.0688*FBG
+                else:
+                    raise ValueError("Invalid sex, should be 'Male' or 'Female'")
+
+                df = pd.DataFrame([[Age, SBP, ALT, tyg, BMI, WC, TG, AST, cmets]], columns=model9.feature_names)
+
+                print(datetime.datetime.now(), df)
+
+                # global prob, shap_values
+                prob = model9.predict(xgb.DMatrix(data=df, feature_names=model9.feature_names))[0]
+
+                shap_values = explainer9(df.iloc[:1])[0]
+
+                df = pd.DataFrame(prob.T, columns=['prob'])
+                df['label'] = ["None","Mild","Moderate to Severe"]
+
+                # pieplot = px.pie(values=[prob[0], prob[1], prob[2]], names=["无", "轻度", "中度以上"], color=["无", "轻度", "中度以上"] ,color_discrete_map={"无": "green", "轻度": "yellow", "中度以上": "red"}, category_orders={"无": [0], "轻度": [1], "中度以上": [2]})
+
+                pieplot = px.pie(df,values='prob',names='label',color='label',color_discrete_map={'None':'green','Mild':'yellow','Moderate to Severe':'red'}, category_orders={'label':['None','Mild','Moderate to Severe']})
+
+                pieplot.update_traces(textposition='inside', textinfo='percent+label')
+
+                return pieplot                
+        
+        # @render.text
+        @render.ui
+        @reactive.event(input.submit)
+        def suggestion():
+            if np.argmax(prob) == 0:
+                if lang == "CHN":
+                    text = ui.markdown(f"""您的肝脏健康状况良好，请继续保持健康的生活方式，合理饮食，适当运动，定期体检。""")
+                else:
+                    text = ui.markdown(f"""#### Your liver health is in good condition. Please maintain a healthy lifestyle with a balanced diet, regular exercise, and periodic medical check-ups.""")
+            elif np.argmax(prob) == 1:
+                if lang == "CHN":
+                    text = ui.markdown(f"""您有{prob[1]*100:.1f}%的概率有轻度肝脏脂肪变性，轻度脂肪肝是可逆的，请及时干预。日常生活中，建议调整饮食结构，控制糖分和脂肪的摄入，多吃蔬菜水果和富含膳食纤维的食物；限制酒精摄入；增加运动量，每天进行适度的有氧运动；保持良好的心态，积极配合医生的建议，定期复查。""")
+                else:
+                    text = ui.markdown(f"""
+                                       There is a {prob[1]*100:.1f}% probability of mild hepatic steatosis (fatty liver). The good news is that mild fatty liver is reversible with timely intervention.
+                                       
+                                       Recommended lifestyle adjustments:
+
+                                       - Modify your diet: Reduce sugar and fat intake, and increase consumption of vegetables, fruits, and fiber-rich foods.
+                                       - Limit alcohol: Minimize or avoid alcohol to support liver recovery.
+                                       - Stay active: Engage in moderate aerobic exercise daily.
+                                       - Maintain a positive mindset: Follow your doctor's advice and schedule regular follow-ups.
+
+                                       Early intervention can effectively restore liver health—stay consistent with these changes!
+                                       """)
+            else:
+                if lang == "CHN":
+                    text = ui.markdown(f"""您有{prob[2]*100:.1f}%的概率有中度以上肝脏脂肪变性，请及时消化科就诊，进行进一步的检查和治疗。日常生活中，建议严格控制饮食，避免高脂、高糖食物；戒酒；积极锻炼身体，合理安排作息时间；保持乐观的情绪，积极配合治疗，定期复查。请您不必焦虑，通过规范治疗，多数患者可获得显著改善。""")
+                else:
+                    text = ui.markdown(f"""
+                                       There is a {prob[1]*100:.1f}% probability of **moderate to severe** hepatic steatosis (fatty liver). Please visit a gastroenterology department promptly for further examination and treatment.
+                                       
+                                       In daily life, it is recommended to:
+
+                                       Recommended lifestyle adjustments:
+
+                                       - Strictly control your diet, avoiding high-fat and high-sugar foods.
+                                       - Abstain from alcohol.
+                                       - Engage in regular physical activity and maintain a proper sleep schedule.
+                                       - Stay optimistic and actively cooperate with treatment, including follow-up checkups.
+
+                                       There is no need for excessive worry—with proper treatment, most patients show significant improvement.
+                                       """)
+
+
+            # text = """（类别无）：您的肝脏健康状况良好，请继续保持健康的生活方式，合理饮食，适当运动，定期体检
+
+            # （类别轻度）：您有X%的概率有轻度肝脏脂肪变性，轻度脂肪肝是可逆的，请及时干预。日常生活中，建议调整饮食结构，控制糖分和脂肪的摄入，多吃蔬菜水果和富含膳食纤维的十五；限制酒精摄入；增加运动量，每天进行适度的有氧运动；保持良好的心态，积极配合医生的建议，定期复查
+
+            # (类别中度以上)：您有X%的概率有中毒以上肝脏脂肪变性，请及时消化科就诊，进行进一步的检查和治疗。日常生活中，建议严格控制饮食，避免高脂、高糖食物；戒酒；积极锻炼身体，合理安排作息时间；保持乐观的情绪，积极配合治疗，定期复查。请您不必焦虑，通过规范治疗，多数患者可获得显著改善。"""
+
+            return text
+    
+    with ui.card():
+        if lang == 'CHN':
+            ui.panel_title(title="预测结果解释")
+        else:
+            ui.panel_title(title="Interpretation")
+
+        @render.plot
+        @reactive.event(input.submit)
+        def feature_importance():
+            shap.plots.waterfall(shap_values[:, np.argmax(prob)], show=False)
+            return plt.gcf()
+            # return px.bar(x=shap_values[np.argmax(prob)], y=["Age", "SBP", "ALT", "ALB", "LDL", "tyg", "Scr", "BMI", "AST", "UA", "TG", "ALP", "WC", "cmets","intercept"], orientation='h', color=shap_values[np.argmax(prob)]).update_layout(xaxis_title="贡献度", yaxis_title="特征")
+        
+        @render.ui
+        @reactive.event(input.submit)
+        def feature_interpretation():
+            return ui.markdown("""##### Note on Feature Interpretation:
+                               
+The model includes several closely related metabolic indicators—Triglycerides (TG), the Triglyceride Glucose Index (TyG), and the Continuous Metabolic Syndrome Score (CMetS). Because these measures share common biological information (e.g., lipid and glucose metabolism), their individual contribution scores shown above may appear distributed across these features.<br>
+For clinical decision-making, we recommend interpreting TG, TyG, and CMetS together as a combined signal of metabolic health, rather than focusing on any single value in isolation. This does not affect the model’s predictive accuracy but helps ensure a holistic view of metabolic risk.
+                               """)
