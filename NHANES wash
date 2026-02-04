@@ -1,0 +1,344 @@
+library("foreign")
+library("dplyr")
+library("DataExplorer")
+
+files <- list.files(pattern="*.XPT")
+for(file in files){
+  perpos <- which(strsplit(file, "")[[1]]==".")
+  assign(gsub(" ","",substr(file, 1, perpos-1)),read.xport(file))
+}
+
+###权重和人口学特征提取
+DEMO <- P_DEMO[,c("SEQN","SDMVSTRA","WTMECPRP","SDMVPSU","RIAGENDR","RIDAGEYR","RIDRETH3","DMDEDUC2","DMDMARTZ","INDFMPIR","RIDEXPRG")]
+DEMO_dat <- dplyr::rename(.data=DEMO,
+                   Gender=RIAGENDR,
+                   Age=RIDAGEYR,
+                   Race=RIDRETH3,
+                   PIR=INDFMPIR,
+                   EDUcation2=DMDEDUC2, #Adults 20+
+                   Marital=DMDMARTZ,
+                   PIR=INDFMPIR,
+                   Preg2=RIDEXPRG)
+###炎症相关数据
+#血细胞
+exam <- P_CBC[,c("SEQN","LBDNENO","LBDLYMNO","LBXPLTSI","LBDMONO","LBXRDW","LBXNEPCT")]
+exam_dat <- rename(.data=exam,
+                   Neu=LBDNENO, #中性粒细胞
+                   Lym=LBDLYMNO,#淋巴细胞
+                   Plt=LBXPLTSI,#血小板
+                   Mono=LBDMONO,#单核
+                   rbcwide=LBXRDW,#红细胞分布宽度
+                   NEUPC=LBXNEPCT) 
+crp <- P_HSCRP[,c("SEQN","LBXHSCRP","LBDHRPLC")]
+crp$crp <- ifelse(crp$LBDHRPLC==1,crp$LBXHSCRP/sqrt(2),crp$LBXHSCRP) #最低检测值转化
+infla_dat<-full_join(exam_dat,crp,by="SEQN")
+###吸烟
+smoke_dat <- P_SMQ[,c("SEQN","SMQ020","SMQ040")]#020吸烟史，040当前吸烟
+###饮酒
+drink_dat <- P_ALQ[,c("SEQN","ALQ121","ALQ270","ALQ151")]#270的1-7都是重度，151的1是重度，121的0是不饮酒，剩下的都是适度
+###体力活动
+pa_dat <- P_PAQ[,c("SEQN","PAQ605","PAQ610","PAD615","PAQ620","PAQ625","PAD630","PAQ635","PAQ640","PAD645","PAQ650","PAQ655","PAD660","PAQ665","PAQ670","PAD675","PAD680")]
+###BMI，WC
+BMI <- P_BMX[,c("SEQN","BMXBMI","BMXWAIST")]
+BMI_dat <- rename(.data=BMI, BMI=BMXBMI,WC=BMXWAIST)
+###高血压
+bp1 <- P_BPQ[,c("SEQN","BPQ020","BPQ050A")]
+bp_dat1 <- rename(.data=bp1,hypter=BPQ020,hbpmedcine=BPQ050A) 
+bp_dat2 <- P_BPXO[,c("SEQN","BPXOSY1","BPXOSY2","BPXOSY3","BPXODI1","BPXODI2","BPXODI3")]
+bp_dat<-merge(bp_dat1,bp_dat2,by = "SEQN")
+###糖尿病
+diq <- P_DIQ[,c("SEQN","DIQ010","DIQ050","DIQ070")]
+Diabetes_dat <- rename(.data=diq,
+                       Diabetes1=DIQ010,  #医生告诉你有糖尿病
+                       Insulin1=DIQ050,  #服用胰岛素
+                       Sugar=DIQ070) #服用降糖药
+Glycohemoglobin <-P_GHB[,c("SEQN","LBXGH")]
+Glycohemoglobin_dat <- rename(.data=Glycohemoglobin,hba1c=LBXGH)
+Glucose <- P_GLU[,c("SEQN","LBXGLU","WTSAFPRP")]
+Glucose_dat <- rename(.data=Glucose,Glucose=LBXGLU)
+ins_dat <- P_INS[,c("SEQN","LBXIN","LBDINLC")]
+ins_dat$insulin <- ifelse(ins_dat$LBDINLC==1,ins_dat$LBXIN/sqrt(2),ins_dat$LBXIN) #最低检测值转化
+Diabetes1<-full_join(Diabetes_dat,Glycohemoglobin_dat,by="SEQN")
+Diabetes2<-full_join(Diabetes1,ins_dat,by="SEQN")
+Dia_dat<-full_join(Diabetes2,Glucose_dat,by="SEQN") #高血糖数据集
+###血液学指标
+bio <- P_BIOPRO[,c("SEQN","LBXSCR","LBXSATSI","LBDSATLC","LBXSASSI","LBXSGTSI","LBDSGTLC","LBXSAL","LBXSTR",
+                   "LBXSAPSI","LBDSGBSI","LBXSLDSI","LBXSPH","LBXSTB","LBXSCA","LBXSTP","LBXSUA")]
+bio$LBXSGTSI <- ifelse(bio$LBDSGTLC==1,bio$LBXSGTSI/sqrt(2),bio$LBXSGTSI)
+bio$LBXSATSI <- ifelse(bio$LBDSATLC==1,bio$LBXSATSI/sqrt(2),bio$LBXSATSI)
+Bio_dat <- rename(.data=bio,Scr=LBXSCR,ALT=LBXSATSI,AST=LBXSASSI,GGT=LBXSGTSI,ALB=LBXSAL,TG=LBXSTR,
+                  ALP=LBXSAPSI,GLB=LBDSGBSI,LDH=LBXSLDSI,P=LBXSPH,STB=LBXSTB,Ca=LBXSCA,TP=LBXSTP,UA=LBXSUA,
+)
+###Fe
+Fe1 <- P_FERTIN[,c("SEQN","LBXFER")]
+FE1_DAT <- rename(.data=Fe1,FeP=LBXFER)
+fe2 <- P_FETIB[,c("SEQN","LBXIRN","LBDTIBSI","LBDPCT")]
+FE2_DAT <- rename(.data=fe2,Fe=LBXIRN,TIBC=LBDTIBSI,TSF=LBDPCT)
+###白蛋白肌酐比值
+acr <- P_ALB_CR[,c("SEQN","URDACT")]
+acratio_dat <- rename(.data=acr,ACR=URDACT)
+###血脂
+ldl <- P_TRIGLY[,c("SEQN","LBDLDL")]
+TGLDL_dat <- rename(.data=ldl,LDL=LBDLDL)
+hdl <- P_HDL[,c("SEQN","LBDHDD")]
+HDL_dat <- rename(.data=hdl,HDL=LBDHDD)
+tc <- P_TCHOL[,c("SEQN","LBXTC")]
+TC_dat <- rename(.data=tc,TC=LBXTC)
+###病毒性肝炎
+virous1 <- P_HEPBD[,c("SEQN","LBDHD","LBDHBG","LBXHBC")]
+virous2 <- P_HEPC[,c("SEQN","LBXHCR")]
+virous <- merge(virous1,virous2,all=T)
+virous_dat <- rename(.data=virous,HDV=LBDHD,hbsag=LBDHBG,hbcab=LBXHBC,HCV=LBXHCR)
+###现在怀孕
+pre <- P_RHQ[,c("SEQN","RHD143")]
+preg1 <- rename(.data=pre,preg1=RHD143)
+###肝脏超声
+lu <- P_LUX[,c("SEQN","LUAXSTAT","LUXSMED","LUXCAPM")]#LUAXSTAT为12的纳入
+lu_dat <- rename(.data=lu,lu_state=LUAXSTAT,lsm=LUXSMED,cap=LUXCAPM)
+
+###横向合并
+D1 <- merge(DEMO_dat,infla_dat,by="SEQN",all = T)
+D2 <- merge(D1,smoke_dat,by="SEQN",all = T)
+D3 <- merge(D2,drink_dat,by="SEQN",all = T)
+D4 <- merge(D3,pa_dat,by="SEQN",all = T)
+D5 <- merge(D4,BMI_dat,by="SEQN",all = T)
+D6 <- merge(D5,bp_dat,by="SEQN",all = T)
+D7 <- merge(D6,Dia_dat,by="SEQN",all = T)
+D8 <- merge(D7,Bio_dat,by="SEQN",all = T)
+D9 <- merge(D8,acratio_dat,by="SEQN",all = T)
+D10 <- merge(D9,TGLDL_dat,by="SEQN",all = T)
+D11 <- merge(D10,HDL_dat,by="SEQN",all = T)
+D12 <- merge(D11,TC_dat,by="SEQN",all = T)
+D13 <- merge(D12,virous_dat,by="SEQN",all = T)
+D14 <- merge(D13,preg1,by="SEQN",all = T)
+D15 <- merge(D14,lu_dat,by="SEQN",all = T)
+D16 <- merge(D15,FE1_DAT,by="SEQN",all = T)
+D17 <- merge(D16,FE2_DAT,by="SEQN",all = T)
+###去除重复
+DATA<- D17[!duplicated(D17$SEQN), ]
+
+
+
+shuju <- DATA
+
+###纳排标准
+
+
+#排除年龄<18 
+shuju1 <- subset(shuju,shuju$Age>=18)
+#排除怀孕
+shuju2 <- subset(shuju1,shuju1$Preg2 %in% c(2,3,NA))
+shuju3 <- subset(shuju2,shuju2$preg1 %in% c(2,9,NA))
+#排除缺失影像数据
+table(shuju3$lu_state,useNA = "ifany")
+shuju4 <- subset(shuju3,shuju3$lu_state %in% c(1,2))
+shuju5 <- subset(shuju4,!is.na(shuju4$cap))
+#缺失BMI
+shuju6 <- subset(shuju5,!is.na(shuju5$BMI))
+#纳入亚洲人
+shuju7 <- subset(shuju6,shuju6$Race==6)
+
+data <- shuju7
+str(data)
+plot_missing(data)
+#1男0女
+data$Gender <- ifelse(data$Gender==1,1,0)
+
+
+###变量分组
+#腰围orBMI
+data$waist_n <- ifelse(data$Gender==1 & data$WC>=102,1,ifelse(data$Gender==0 & data$WC>=88,1,0))
+#BMI(>=24超重，>=28肥胖)
+data$bmi_n <- ifelse(data$BMI>=25,1,0)
+data$weight <- ifelse(data$waist_n==1|data$bmi_n==1,1,0)
+table(data$bmi_n)
+table(data$waist_n)
+table(data$weight)
+#血压
+data$s_mean <- apply(data[,c("BPXOSY1","BPXOSY2","BPXOSY3")],1,mean,na.rm=T)
+data$d_mean <- apply(data[,c("BPXODI1","BPXODI2","BPXODI3")],1,mean,na.rm=T)
+summary(data$d_mean)
+data$hbpmedcine <- ifelse(is.na(data$hbpmedcine),999,data$hbpmedcine)
+data$hypter <- ifelse(is.na(data$hypter),999,data$hypter)
+data$hbp <- ifelse(data$s_mean>=130 | data$d_mean>=85 | data$hbpmedcine==1 | data$hypter==1,1,0 )
+#mg转mmol
+data$TG <- data$TG / 88.57
+data$TC <- data$TC / 38.67
+data$HDL <- data$HDL / 38.67
+data$LDL <- data$LDL / 38.67
+data$Glucose <- data$Glucose / 18.02
+#甘油三酯
+data$tri_chol_n <- ifelse(data$TG>=1.7,1,0)
+#hdl
+data$hdl_n <- ifelse((data$Gender == 1 & data$HDL < 1) | (data$Gender == 0 & data$HDL < 1.3),1,0)
+table(data$hdl_n,useNA = "ifany")
+#糖尿病或糖尿病前期
+data$Insulin <- ifelse(is.na(data$Insulin1),999,data$Insulin1)
+data$Sugar <- ifelse(is.na(data$Sugar),999,data$Sugar)
+data$dm <- ifelse(data$Diabetes1==1 | data$hba1c>=6.5|data$Glucose>=7.0,1,0)
+table(data$dm,useNA = "ifany")
+data$predm <- ifelse((data$Glucose>6.1 & data$Glucose<6.9)|(data$hba1c>5.7&data$hba1c<6.4),1,0)
+data$pre.dm <- ifelse(data$dm==1|data$predm==1,1,0)
+table(data$pre.dm,useNA = "ifany")
+#代谢失调组分（参考指南）：
+df <- data.frame(b=data$hbp,c=data$tri_chol_n,d=data$hdl_n,g=data$pre.dm,a=data$weight)
+data$meta <- rowSums(df,na.rm = T)
+table(data$meta,useNA = "ifany")
+data_beforemi <- data
+
+
+###多重插补-----------------------------------------------------------------------------------------
+library(ggplot2)
+library(lattice)
+library(miceadds)  # 支持随机森林插补
+library(VIM)       # 可视化缺失模式
+library(parallel)
+library(lattice) #调入函数包
+library(MASS)
+library(nnet)
+library(mice) #前三个包是mice的基础
+library(foreign)
+library(ranger)
+library(future)
+library(future.apply)
+library(doParallel)
+library(dplyr)
+str(data)
+df <- data[,c("Gender","Age","Neu","Lym","Plt","Mono","NEUPC","crp","BMI","WC","hba1c",
+                  "Glucose","Scr","ALT","AST","GGT","ALB","TG","ALP","GLB","TP","UA","LDL","HDL","TC","STB",
+                  "cap","s_mean","d_mean","meta")]
+plot_missing(df)
+str(df)
+#分类变量转为因子:
+df$Gender <- as.factor(df$Gender)
+str(df)
+View(df)
+#多核运算
+cl <- makeCluster(detectCores() - 1)
+registerDoParallel(cl)
+
+
+# 提取5个插补后的数据框
+# 运行多重插补
+set.seed(123)
+imp <- mice(df, method = "rf", m = 5, seed = 123)
+
+# 在多个插补数据集上建立模型并计算AIC
+aic_values <- c()
+models_list <- list()
+
+# 循环遍历每个插补数据集
+for (i in 1:5) {
+  # 提取第 i 个插补数据集
+  imputed_data <- complete(imp, i)
+  
+  # 在这里建立你的预测模型（假设因变量是y，自变量是x1, x2, x3）
+  # 请根据你的实际研究调整模型公式
+  model <- glm(cap_lev ~ age+sbp+ALT+tyg+BMI+WC+TG+AST+Scr+UA+LDL+ALB+cmets, data = imputed_data, family = binomial)
+  
+  # 存储模型和AIC值
+  models_list[[i]] <- model
+  aic_values[i] <- AIC(model)
+}
+
+# 查看每个数据集的AIC值
+print("各插补数据集的AIC值：")
+print(aic_values)
+
+# 找到AIC最小的数据集索引
+best_dataset_index <- which.min(aic_values)
+print(paste("最佳数据集索引：", best_dataset_index))
+print(paste("最小AIC值：", aic_values[best_dataset_index]))
+
+# 提取最佳数据集
+best_imputed_data <- complete(imp, best_dataset_index)
+write.csv(best_imputed_data,file = "data_aftermi.csv")
+data <-read.csv("data_aftermi.csv")[-1]
+#计算其他综合指标---------------------------------------------
+data$dm <- data_beforemi$dm
+data$dm <- ifelse(is.na(data$dm),0,data$dm)
+data$hbp <- data_beforemi$hbp
+data$hbp <- ifelse(is.na(data$hbp),0,data$hbp)
+
+#MAP
+data$MAP <- (data$s_mean + 2 * data$d_mean) / 3
+plot_missing(data)
+#cMetS评分
+# 初始化MetS score列
+data$cmets <- NA
+cond_male_young <- data$Gender == 1 & data$Age < 60
+data$cmets[cond_male_young] <- -2.9092 + 
+  0.0262 * data$WC[cond_male_young] +
+  0.3098 * data$TG[cond_male_young] -
+  0.944 * data$HDL[cond_male_young] +
+  0.0097 * data$MAP[cond_male_young] +
+  0.0745 * data$Glucose[cond_male_young]
+cond_male_old <- data$Gender == 1 & data$Age >= 60
+data$cmets[cond_male_old] <- -2.3741 + 
+  0.0264 * data$WC[cond_male_old] +
+  0.4933 * data$TG[cond_male_old] -
+  0.999 * data$HDL[cond_male_old] +
+  0.0054 * data$MAP[cond_male_old] +
+  0.0821 * data$Glucose[cond_male_old]
+cond_female_young <- data$Gender == 0 & data$Age < 60
+data$cmets[cond_female_young] <- -2.4981 + 
+  0.0199 * data$WC[cond_female_young] +
+  0.5218 * data$TG[cond_female_young] -
+  0.8616 * data$HDL[cond_female_young] +
+  0.0110 * data$MAP[cond_female_young] +
+  0.1074 * data$Glucose[cond_female_young]
+cond_female_old <- data$Gender == 0 & data$Age >= 60
+data$cmets[cond_female_old] <- -0.5682 + 
+  0.0153 * data$WC[cond_female_old] +
+  0.4587 * data$TG[cond_female_old] -
+  1.3567 * data$HDL[cond_female_old] +
+  0.0036 * data$MAP[cond_female_old] +
+  0.0688 * data$Glucose[cond_female_old]
+#ast/alt
+data$"AST/ALT" <- data$AST/data$ALT
+#NLR
+data$NLR <- data$Neu/data$Lym
+#PLR
+data$PLR <- data$Plt/data$Lym
+#NPAR中性粒百分比血白蛋白比值
+data$NPAR <- data$NEUPC/data$ALB
+#炎症指数
+data$SII <- data$Plt*data$Neu/data$Lym
+data$SIRI <- data$Mono*data$Neu/data$Lym
+#egfr
+calculate_eGFR <- function(Scr, Gender, Age) {
+  if (Gender == 1) {
+    kappa <- 0.9
+    alpha <- -0.411
+    x <- 1
+  } else if (Gender == 0) {
+    kappa <- 0.7
+    alpha <- -0.329
+    x <- 1.018
+  } else {
+    stop("Invalid input for sex. Please specify 'male' or 'female'.")
+  }
+  eGFR <- 141 * min(Scr / kappa, 1)^alpha * max(Scr / kappa, 1)^(-1.209) * 0.993^Age  *x
+  return(eGFR)
+}
+
+library(dplyr)
+data <- data %>%
+  rowwise()%>%
+  mutate(eGFR=calculate_eGFR(Scr,Gender,Age))
+plot_missing(data)
+#tyg
+data$tyg <- log(((data$TG * 88.57) * (data$Glucose * 18.0182)) / 2)
+
+
+#改名
+str(data)
+data <- rename(.data = data,age=Age,glu=Glucose,sbp=s_mean,dbp=d_mean,gender=Gender)
+View(data)
+###cap按照预实验分级
+data <- data %>%
+  filter(BMI<28)
+
+###导出
+write.csv(data,file="nhanes亚洲人群验证.csv")
+
