@@ -25,10 +25,6 @@ data <- read.csv("after_wash_28.csv")[-1]
 data <- data[,c("age","sbp","ALT","tyg","BMI","WC","TG","AST","Scr","UA","LDL","ALB","cmets","ALP","cap_lev")]
 str(data)
 
-
-#-------------------------------------------------------
-# #核心模型版
-
 #拟合模型
 set.seed(123)
 splitIndex <- createDataPartition(data$cap_lev, p = .7, list = FALSE, times = 1)
