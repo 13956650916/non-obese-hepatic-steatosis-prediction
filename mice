@@ -1,0 +1,53 @@
+import pandas as pd
+from sklearn.model_selection import train_test_split
+import miceforest as mf
+
+
+file_path = r"D:\system\Downloads\data1.csv"
+df = pd.read_csv(file_path)
+
+print("Original data shape:", df.shape)
+
+
+train_df, test_df = train_test_split(
+    df,
+    test_size=0.3,
+    random_state=42
+)
+
+print("Train shape:", train_df.shape)
+print("Test shape:", test_df.shape)
+
+
+kernel = mf.ImputationKernel(
+    train_df,
+    datasets=5,
+    save_all_iterations=True,
+    random_state=None
+)
+
+kernel.mice(
+    iterations=5,
+    mean_match_candidates=5,
+    sample_posterior=True
+)
+
+kernel.mice(iterations=5)
+
+# 获取5个插补后的训练集
+imputed_train_datasets = [
+    kernel.complete_data(dataset=i)
+    for i in range(5)
+]
+
+
+imputed_test = kernel.impute_new_data(test_df)
+imputed_test_df = imputed_test.complete_data()
+
+
+for i, dataset in enumerate(imputed_train_datasets):
+    dataset.to_csv(f"imputed_train_{i+1}.csv", index=False)
+
+imputed_test_df.to_csv("imputed_test.csv", index=False)
+
+print("CSV files saved successfully.")
