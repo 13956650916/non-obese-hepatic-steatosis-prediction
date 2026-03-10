@@ -41,76 +41,6 @@ str(data)
 
 
 
-
-data - data %% select(-SEQN,-high,-weight,-marry,-date,-name,-CRP,-ins,-UACR,-CA199,-TSH,-PSA,-GLB,-TP,-T4,-T3,-dm_q)
-str(data)
-plot_missing(data)
-#gender重新编码，1男0女
-data$gender - ifelse(data$gender==1,1,0)
-
-###多重插补-----------------------------------------------------------------------------------------
-library(ggplot2)
-library(lattice)
-library(miceadds)  # 支持随机森林插补
-library(VIM)       # 可视化缺失模式
-library(parallel)
-library(lattice) #调入函数包
-library(MASS)
-library(nnet)
-library(mice) #前三个包是mice的基础
-library(foreign)
-library(ranger)
-library(future)
-library(future.apply)
-library(doParallel)
-library(dplyr)
-#整理插补数据集
-data$hba1c_pd - data$hba1c#pd是插补后，用于预测模型。不带pd是有缺失，用于诊断dm,诊断后删除
-df - data[,!names(data)%in%c(hbp_q,dm_q,hba1c)]
-
-#分类变量转为因子
-df$gender - as.factor(df$gender)
-str(df)
-#多核运算
-cl - makeCluster(detectCores() - 1)
-registerDoParallel(cl)
-
-# 运行多重插补
-set.seed(123)
-imp - mice(df, method = rf, m = 5, seed = 123)
-
-# 在多个插补数据集上建立模型并计算AIC
-aic_values - c()
-models_list - list()
-
-# 循环遍历每个插补数据集
-for (i in 15) {
-  # 提取第 i 个插补数据集
-  imputed_data - complete(imp, i)
-  
-  # 在这里建立你的预测模型（假设因变量是y，自变量是x1, x2, x3）
-  # 请根据你的实际研究调整模型公式
-  model - glm(cap_lev ~ age+sbp+ALT+tyg+BMI+WC+TG+AST+Scr+UA+LDL+ALB+cmets, data = imputed_data, family = binomial)
-  
-  # 存储模型和AIC值
-  models_list[[i]] - model
-  aic_values[i] - AIC(model)
-}
-
-# 查看每个数据集的AIC值
-print(各插补数据集的AIC值：)
-print(aic_values)
-
-# 找到AIC最小的数据集索引
-best_dataset_index - which.min(aic_values)
-print(paste(最佳数据集索引：, best_dataset_index))
-print(paste(最小AIC值：, aic_values[best_dataset_index]))
-
-# 提取最佳数据集
-best_imputed_data - complete(imp, best_dataset_index)
-write.csv(best_imputed_data,file = data_aftermi.csv)
-data -read.csv(data_aftermi.csv)[-1]
-
 ###变量重新分组与复合指标计算-----------------------------------------------------------------
 data - data_aftermi
 #腰围orBMI
@@ -217,5 +147,4 @@ data - data %%
   filter(BMI28)
 View(data)
 write.csv(data,file = after_wash_28.csv)
-#保存二进制格式，内存小方便导入风暴统计
-saveRDS(data, baseline.rds)
+
