@@ -100,8 +100,8 @@ View(data)
 
 ###数据分类导出
 #记得bmi要小于28
-write.csv(data,file = after_wash_all.csv)
+write.csv(data,file = after_cal_all.csv)
 data - data %%
   filter(BMI28)
 View(data)
-write.csv(data,file = after_wash_28.csv)
+write.csv(data,file = cal_train_1.csv)
