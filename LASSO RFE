@@ -1,5 +1,5 @@
 rm(list = ls())
-DATA <- read.csv("after_wash_28.csv")
+DATA <- read.csv("data1.csv")
 data <- DATA
 View(data)
 
