@@ -34,7 +34,7 @@ alpha1_fit<-glmnet(x,y,alpha=1,family="multinomial",nlambda=100)
 plot(alpha1_fit,xvar="lambda",label=TRUE)
 #交叉验证曲线。回归mae，分类deviance
 set.seed(123)
-alpha1.fit.cv<-cv.glmnet(x,y,nfold=10,alpha=1,family="binomial")
+alpha1.fit.cv<-cv.glmnet(x,y,nfold=10,alpha=1,family="multinomial")
 plot(alpha1.fit.cv)
 #筛选结果
 print(alpha1.fit.cv)
@@ -72,7 +72,7 @@ table(data$cap_lev)
 # 分离特征和结局变量
 x <- data %>% dplyr::select(-cap_lev)
 y <- data$cap_lev
-# ==================== 设置更密集的特征子集大小 ====================
+
 # 计算总特征数量
 num_features <- ncol(x)
 cat("\n总特征数量:", num_features, "\n")
@@ -83,12 +83,6 @@ sizes_dense <- seq(1, min(30, num_features), by = 2)
 cat("密集sizes（步长2）:\n")
 print(sizes_dense)
 
-sample_size <- min(10000, nrow(x))
-cat("\n将使用", sample_size, "个样本进行特征筛选\n")
-cat("原因：", 
-    ifelse(nrow(x) > 10000, 
-           "数据量太大，使用子样本加速计算",
-           "数据量适中，使用全部数据"), "\n")
 
 # 随机抽取样本
 set.seed(123)
