@@ -184,76 +184,7 @@ table(data$pre.dm,useNA = "ifany")
 df <- data.frame(b=data$hbp,c=data$tri_chol_n,d=data$hdl_n,g=data$pre.dm,a=data$weight)
 data$meta <- rowSums(df,na.rm = T)
 table(data$meta,useNA = "ifany")
-data_beforemi <- data
 
-
-###多重插补-----------------------------------------------------------------------------------------
-library(ggplot2)
-library(lattice)
-library(miceadds)  # 支持随机森林插补
-library(VIM)       # 可视化缺失模式
-library(parallel)
-library(lattice) #调入函数包
-library(MASS)
-library(nnet)
-library(mice) #前三个包是mice的基础
-library(foreign)
-library(ranger)
-library(future)
-library(future.apply)
-library(doParallel)
-library(dplyr)
-str(data)
-df <- data[,c("Gender","Age","Neu","Lym","Plt","Mono","NEUPC","crp","BMI","WC","hba1c",
-                  "Glucose","Scr","ALT","AST","GGT","ALB","TG","ALP","GLB","TP","UA","LDL","HDL","TC","STB",
-                  "cap","s_mean","d_mean","meta")]
-plot_missing(df)
-str(df)
-#分类变量转为因子:
-df$Gender <- as.factor(df$Gender)
-str(df)
-View(df)
-#多核运算
-cl <- makeCluster(detectCores() - 1)
-registerDoParallel(cl)
-
-
-# 提取5个插补后的数据框
-# 运行多重插补
-set.seed(123)
-imp <- mice(df, method = "rf", m = 5, seed = 123)
-
-# 在多个插补数据集上建立模型并计算AIC
-aic_values <- c()
-models_list <- list()
-
-# 循环遍历每个插补数据集
-for (i in 1:5) {
-  # 提取第 i 个插补数据集
-  imputed_data <- complete(imp, i)
-  
-  # 在这里建立你的预测模型（假设因变量是y，自变量是x1, x2, x3）
-  # 请根据你的实际研究调整模型公式
-  model <- glm(cap_lev ~ age+sbp+ALT+tyg+BMI+WC+TG+AST+Scr+UA+LDL+ALB+cmets, data = imputed_data, family = binomial)
-  
-  # 存储模型和AIC值
-  models_list[[i]] <- model
-  aic_values[i] <- AIC(model)
-}
-
-# 查看每个数据集的AIC值
-print("各插补数据集的AIC值：")
-print(aic_values)
-
-# 找到AIC最小的数据集索引
-best_dataset_index <- which.min(aic_values)
-print(paste("最佳数据集索引：", best_dataset_index))
-print(paste("最小AIC值：", aic_values[best_dataset_index]))
-
-# 提取最佳数据集
-best_imputed_data <- complete(imp, best_dataset_index)
-write.csv(best_imputed_data,file = "data_aftermi.csv")
-data <-read.csv("data_aftermi.csv")[-1]
 #计算其他综合指标---------------------------------------------
 data$dm <- data_beforemi$dm
 data$dm <- ifelse(is.na(data$dm),0,data$dm)
