@@ -1,20 +1,12 @@
 rm(list = ls())
-DATA <- read.csv("data1.csv")
-data <- DATA
-View(data)
+DATA <- read.csv("imputed_train_1.csv")
+train_data <- DATA
+View(train_data)
 
 
-data$cap_lev <- factor(data$cap_lev, levels = c(0,1,2), ordered = TRUE) # 指定该因子为有序
-str(data) # 查看结构，确认是有序因子
+train_data$cap_lev <- factor(train_data$cap_lev, levels = c(0,1,2), ordered = TRUE) # 指定该因子为有序
+str(train_data) # 查看结构，确认是有序因子
 
-#随机划分数据集为训练集和验证集
-set.seed(123)
-train_index <- createDataPartition(y=data$cap_lev,p=0.7,list=F)
-train_data <- data[train_index, ]#训练集
-val_data <- data[-train_index,]#验证集
-#查看划分数据集的因变量分布情况
-table(train_data$cap_lev)
-table(train_data$mafld)#不用额外处理
 ###lasso筛选特征变量------------------------------------------------------------------
 #标准化
 cont_vars <- sapply(train_data, is.numeric) & names(train_data) != "cap_lev" &names(train_data) != "gender" & names(train_data) != "dm"& names(train_data) != "hbp"& names(train_data) != "mafld"
@@ -45,7 +37,7 @@ feature_opt<-feature_all%>%filter(abs(coff)>0)
 rownames(feature_opt)
 
 #RFE筛选
-DATA <- read.csv("after_wash_all.csv")[-1]
+DATA <- read.csv("imputed_train_1.csv")[-1]
 #1.2,2,2000 2400 2200,0.72,1 0.75
 data <- DATA
 #bmi小于28
@@ -84,17 +76,6 @@ cat("密集sizes（步长2）:\n")
 print(sizes_dense)
 
 
-# 随机抽取样本
-set.seed(123)
-sample_indices <- sample(1:nrow(x), sample_size)
-x_subset <- x[sample_indices, ]
-y_subset <- y[sample_indices]
-# 检查子样本的类别分布
-cat("\n子样本类别分布:\n")
-print(table(y_subset))
-cat("各类别比例:\n")
-print(prop.table(table(y_subset)))
-
 
 # ==================== 设置RFES控制参数 ====================
 # 使用分层抽样确保每个折叠都有所有类别
@@ -117,7 +98,7 @@ ctrl <- rfeControl(
   verbose = TRUE,  # 显示详细过程
   returnResamp = "final",
   saveDetails = TRUE,
-  allowParallel = FALSE  # 先不使用并行，便于调试
+  allowParallel = FALSE  
 )
 
 # ==================== 运行RFES ====================
